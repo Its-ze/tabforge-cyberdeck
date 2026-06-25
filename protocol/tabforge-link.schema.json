@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://its-ze.github.io/tabforge-cyberdeck/schemas/tabforge-link-v0.json",
+  "title": "TabForge Link v0 Frame",
+  "type": "object",
+  "required": ["type", "protocol", "id", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "type": "string",
+      "pattern": "^tabforge\\.[a-z0-9.-]+$"
+    },
+    "protocol": {
+      "const": "tabforge-link-v0"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "ts": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

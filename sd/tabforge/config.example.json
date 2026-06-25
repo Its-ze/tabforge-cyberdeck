@@ -1,0 +1,40 @@
+{
+  "schema": "tabforge.runtime-config.v0",
+  "deckName": "TabForge Cyberdeck",
+  "operatorLabel": "Tab5",
+  "defaultMode": "meshtastic",
+  "updateChannel": "stable",
+  "devices": {
+    "unit-c6l": {
+      "enabled": true,
+      "preferredTransport": "usb-cdc",
+      "mode": "meshtastic",
+      "displayName": "C6L Mesh"
+    },
+    "tdeck": {
+      "enabled": true,
+      "preferredTransport": "usb-cdc",
+      "mode": "zdeck-meshtastic",
+      "displayName": "T-Deck"
+    },
+    "unit-ir": {
+      "enabled": true,
+      "preferredTransport": "grove-port-b",
+      "displayName": "IR Unit"
+    }
+  },
+  "mic": {
+    "recordPath": "/tabforge/audio",
+    "maxClipSeconds": 30,
+    "voiceMacrosEnabled": true
+  },
+  "logging": {
+    "eventLog": "/tabforge/logs/events.jsonl",
+    "redactMeshSecrets": true,
+    "recordGpsByDefault": false
+  },
+  "ota": {
+    "manifestUrl": "https://its-ze.github.io/tabforge-cyberdeck/manifest.json",
+    "requireButtonConfirm": true
+  }
+}

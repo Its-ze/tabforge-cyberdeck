@@ -1,0 +1,74 @@
+{
+  "schema": "tabforge.device-profiles.v0",
+  "devices": [
+    {
+      "id": "tab5",
+      "name": "M5Stack Tab5",
+      "role": "primary-cyberdeck",
+      "links": ["usb-host", "usb-otg", "grove", "m5-bus", "wifi", "sd"],
+      "features": ["touchscreen", "dual-mic", "speaker", "camera", "imu", "rtc", "rs485", "sd", "usb-host", "battery-monitor"],
+      "defaultFirmware": "tabforge-tab5",
+      "publicSafe": true
+    },
+    {
+      "id": "unit-c6l",
+      "name": "M5Stack Unit C6L",
+      "role": "detachable-lora-radio",
+      "links": ["usb-cdc", "grove-uart", "ble", "wifi-ota"],
+      "features": ["esp32-c6", "sx1262", "oled-64x48", "rgb-led", "buzzer", "button"],
+      "modes": ["meshtastic", "meshcore", "tabforge-bridge"],
+      "defaultMode": "meshtastic",
+      "publicSafe": true
+    },
+    {
+      "id": "tdeck",
+      "name": "LilyGO T-Deck",
+      "role": "mesh-companion",
+      "links": ["usb-cdc", "wifi-bridge", "meshtastic-serial"],
+      "features": ["keyboard", "display", "lora", "gps", "sd"],
+      "modes": ["zdeck-meshtastic", "meshcore-companion"],
+      "defaultMode": "zdeck-meshtastic",
+      "publicSafe": false,
+      "notes": ["Preserve private channels and LittleFS by default."]
+    },
+    {
+      "id": "unit-ir",
+      "name": "M5Stack Unit IR",
+      "role": "ir-learner-blaster",
+      "links": ["grove-port-b"],
+      "features": ["940nm-emitter", "38khz-receiver", "nec-decode", "nec-send"],
+      "defaultMode": "ir-lab",
+      "publicSafe": true
+    }
+  ],
+  "transports": [
+    {
+      "id": "usb-cdc",
+      "name": "USB CDC Serial",
+      "priority": 1,
+      "useFor": ["unit-c6l", "tdeck"],
+      "notes": "Preferred for first Meshtastic/MeshCore integration because it avoids wireless mode conflicts."
+    },
+    {
+      "id": "grove-uart",
+      "name": "Grove UART",
+      "priority": 2,
+      "useFor": ["unit-c6l"],
+      "notes": "Use only with a known bridge firmware profile or documented serial pinout."
+    },
+    {
+      "id": "ble",
+      "name": "BLE",
+      "priority": 3,
+      "useFor": ["unit-c6l"],
+      "notes": "Meshtastic on ESP32-C6 cannot use Bluetooth and Wi-Fi at the same time."
+    },
+    {
+      "id": "wifi-ota",
+      "name": "Wi-Fi OTA",
+      "priority": 4,
+      "useFor": ["tab5", "unit-c6l", "tdeck"],
+      "notes": "Use only after manifest hash verification and on-screen confirmation."
+    }
+  ]
+}

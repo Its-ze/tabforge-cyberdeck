@@ -1,0 +1,32 @@
+name: Build Tab5 Firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - firmware/tabforge-tab5/**
+      - .github/workflows/firmware-tab5.yml
+
+jobs:
+  build-tab5:
+    name: ESP-IDF esp32p4 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: release-v5.4
+          target: esp32p4
+          path: firmware/tabforge-tab5
+          command: idf.py build
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tabforge-tab5-firmware
+          path: |
+            firmware/tabforge-tab5/build/*.bin
+            firmware/tabforge-tab5/build/*.elf
+            firmware/tabforge-tab5/build/*.map

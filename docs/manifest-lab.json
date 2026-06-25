@@ -1,0 +1,20 @@
+{
+  "schema": "tabforge.ota-manifest.v0",
+  "project": "tabforge-cyberdeck",
+  "channel": "lab",
+  "generatedAt": "2026-06-25T00:00:00Z",
+  "latest": {
+    "version": "0.1.0-lab",
+    "name": "TabForge Cyberdeck Lab",
+    "target": "tab5-esp32p4",
+    "status": "scaffold",
+    "releaseNotesUrl": "https://its-ze.github.io/tabforge-cyberdeck/",
+    "firmware": {
+      "available": false,
+      "url": null,
+      "sha256": null,
+      "size": null
+    }
+  },
+  "companionProfiles": []
+}

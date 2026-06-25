@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TabForge Console</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="deck">
+    <header class="topbar">
+      <div>
+        <h1>TabForge</h1>
+        <p>C6L Meshtastic</p>
+      </div>
+      <section class="meters" aria-label="Deck status">
+        <span><b id="modeLabel">MESHTASTIC</b> mode</span>
+        <span><b id="linkLabel">USB</b> link</span>
+        <span><b id="updateLabel">0.1.0</b></span>
+      </section>
+    </header>
+
+    <nav class="tabs" aria-label="Console tabs">
+      <button class="tab active" data-tab="mesh">Mesh</button>
+      <button class="tab" data-tab="devices">Devices</button>
+      <button class="tab" data-tab="tools">Tools</button>
+      <button class="tab" data-tab="system">System</button>
+    </nav>
+
+    <section class="workspace">
+      <aside class="rail" aria-label="Mode controls">
+        <button class="mode active" data-mode="meshtastic">
+          <span>Meshtastic</span>
+          <small>C6L serial</small>
+        </button>
+        <button class="mode" data-mode="meshcore">
+          <span>MeshCore</span>
+          <small>CLI / OTA</small>
+        </button>
+        <button class="mode" data-mode="bridge">
+          <span>Bridge</span>
+          <small>JSON link</small>
+        </button>
+      </aside>
+
+      <section class="panel" id="panel">
+        <div class="panel-head">
+          <div>
+            <h2 id="panelTitle">Mesh Dashboard</h2>
+            <p id="panelSub">C6L status, mesh traffic, and mode switching.</p>
+          </div>
+          <button id="updateButton" class="icon-button" title="Check for updates">Update</button>
+        </div>
+
+        <section class="quick-grid" id="quickGrid"></section>
+
+        <section class="terminal" aria-label="Event log">
+          <div class="terminal-head">
+            <span>Event Log</span>
+            <button id="clearLog">Clear</button>
+          </div>
+          <ol id="eventLog"></ol>
+        </section>
+      </section>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

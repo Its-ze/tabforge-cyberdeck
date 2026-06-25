@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TabForge Cyberdeck</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101214;
+      --panel: #181d20;
+      --panel-2: #20262a;
+      --line: #344047;
+      --text: #edf4f2;
+      --muted: #9dacaa;
+      --green: #5ee08b;
+      --yellow: #e9c95d;
+      --cyan: #69d2e7;
+      --red: #ff7a6b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 24px 0 40px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 16px;
+      align-items: end;
+      padding: 18px 0 22px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(32px, 6vw, 68px);
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 10px 0 0;
+      color: var(--muted);
+      max-width: 760px;
+      font-size: 16px;
+      line-height: 1.5;
+    }
+
+    .status {
+      display: grid;
+      gap: 8px;
+      min-width: 220px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+    }
+
+    .status span {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .status strong {
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .card {
+      min-height: 130px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .card h2 {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1.2;
+    }
+
+    .card p {
+      color: var(--muted);
+      margin: 10px 0 0;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      height: 24px;
+      margin-top: 14px;
+      padding: 0 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .tag.ready {
+      color: var(--green);
+      border-color: rgba(94, 224, 139, 0.45);
+    }
+
+    .tag.plan {
+      color: var(--yellow);
+      border-color: rgba(233, 201, 93, 0.45);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    a.button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      padding: 0 14px;
+      color: var(--text);
+      text-decoration: none;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 14px;
+    }
+
+    a.button.primary {
+      color: #07120c;
+      background: var(--green);
+      border-color: var(--green);
+    }
+
+    pre {
+      overflow: auto;
+      margin: 18px 0 0;
+      padding: 14px;
+      background: #0b0d0e;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--cyan);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    @media (max-width: 880px) {
+      header {
+        grid-template-columns: 1fr;
+      }
+
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 560px) {
+      main {
+        width: min(100vw - 20px, 1180px);
+        padding-top: 12px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .status {
+        min-width: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <section>
+        <h1>TabForge Cyberdeck</h1>
+        <p class="subtitle">M5Stack Tab5 control deck for C6L Meshtastic, MeshCore, T-Deck, IR, audio, USB host, SD logging, and OTA updates.</p>
+      </section>
+      <aside class="status" aria-label="Release status">
+        <span>Channel <strong id="channel">stable</strong></span>
+        <span>Version <strong id="version">0.1.0</strong></span>
+        <span>Firmware <strong id="firmware">manifest</strong></span>
+      </aside>
+    </header>
+
+    <section class="grid" aria-label="Feature areas">
+      <article class="card">
+        <h2>Meshtastic</h2>
+        <p>C6L USB serial first, with nodes, messages, direct sends, canned messages, and location handoff.</p>
+        <span class="tag ready">active</span>
+      </article>
+      <article class="card">
+        <h2>MeshCore</h2>
+        <p>Command console, contacts, rooms, and ESP32 OTA assist through the target OTA access point.</p>
+        <span class="tag plan">planned</span>
+      </article>
+      <article class="card">
+        <h2>IR Lab</h2>
+        <p>Learn and replay short-range 38 kHz IR commands from the Grove Unit IR.</p>
+        <span class="tag ready">active</span>
+      </article>
+      <article class="card">
+        <h2>Mic Deck</h2>
+        <p>Push-to-record WAV clips, sound meter, and local voice macro metadata on SD.</p>
+        <span class="tag ready">active</span>
+      </article>
+      <article class="card">
+        <h2>T-Deck Link</h2>
+        <p>Existing Z-Deck/Meshtastic companion status and safe update workflows without private config erasure.</p>
+        <span class="tag ready">active</span>
+      </article>
+      <article class="card">
+        <h2>USB Host</h2>
+        <p>Serial boards, keyboards, mouse input, and removable storage from the Tab5 host port.</p>
+        <span class="tag ready">active</span>
+      </article>
+      <article class="card">
+        <h2>Camera / IMU</h2>
+        <p>QR, device-label scan, orientation, wake gestures, and motion-triggered deck actions.</p>
+        <span class="tag plan">planned</span>
+      </article>
+      <article class="card">
+        <h2>Update Center</h2>
+        <p>GitHub Pages manifest, SHA256 verification, on-screen confirmation, and companion update assist.</p>
+        <span class="tag ready">active</span>
+      </article>
+    </section>
+
+    <section class="actions" aria-label="Project links">
+      <a class="button primary" href="manifest.json">Manifest</a>
+      <a class="button" href="manifest-lab.json">Lab Manifest</a>
+      <a class="button" href="architecture.md">Architecture</a>
+      <a class="button" href="ota-and-github.md">OTA</a>
+      <a class="button" href="security.md">Security</a>
+    </section>
+
+    <pre id="manifest-preview">Loading manifest...</pre>
+  </main>
+
+  <script>
+    async function loadManifest() {
+      const preview = document.getElementById("manifest-preview");
+      try {
+        const res = await fetch("manifest.json", { cache: "no-store" });
+        if (!res.ok) throw new Error("manifest fetch failed");
+        const data = await res.json();
+        document.getElementById("channel").textContent = data.channel || "stable";
+        document.getElementById("version").textContent = data.latest && data.latest.version ? data.latest.version : "unknown";
+        const firmware = data.latest && data.latest.firmware && data.latest.firmware.available ? "available" : "not published";
+        document.getElementById("firmware").textContent = firmware;
+        preview.textContent = JSON.stringify(data, null, 2);
+      } catch (err) {
+        preview.textContent = String(err);
+        document.getElementById("firmware").textContent = "offline";
+      }
+    }
+
+    loadManifest();
+  </script>
+</body>
+</html>

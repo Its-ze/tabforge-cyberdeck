@@ -1,0 +1,42 @@
+{
+  "schema": "tabforge.ota-manifest.v0",
+  "project": "tabforge-cyberdeck",
+  "channel": "stable",
+  "generatedAt": "2026-06-25T00:00:00Z",
+  "latest": {
+    "version": "0.1.0",
+    "name": "TabForge Cyberdeck 0.1.0",
+    "target": "tab5-esp32p4",
+    "status": "scaffold",
+    "releaseNotesUrl": "https://its-ze.github.io/tabforge-cyberdeck/",
+    "firmware": {
+      "available": false,
+      "url": null,
+      "sha256": null,
+      "size": null
+    }
+  },
+  "companionProfiles": [
+    {
+      "id": "unit-c6l-meshtastic",
+      "device": "unit-c6l",
+      "mode": "meshtastic",
+      "preferredTransport": "usb-cdc",
+      "notes": "Use official Meshtastic firmware and client/flasher flow."
+    },
+    {
+      "id": "unit-c6l-meshcore",
+      "device": "unit-c6l",
+      "mode": "meshcore",
+      "preferredTransport": "usb-cdc",
+      "notes": "Use MeshCore profile only after backing up current Meshtastic configuration."
+    },
+    {
+      "id": "tdeck-zdeck",
+      "device": "tdeck",
+      "mode": "zdeck-meshtastic",
+      "preferredTransport": "usb-cdc",
+      "notes": "Preserve LittleFS/private settings by default."
+    }
+  ]
+}

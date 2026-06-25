@@ -1,0 +1,26 @@
+{
+  "schema": "tabforge.update-channels.v0",
+  "project": "tabforge-cyberdeck",
+  "defaultChannel": "stable",
+  "channels": [
+    {
+      "id": "stable",
+      "name": "Stable",
+      "manifestUrl": "https://its-ze.github.io/tabforge-cyberdeck/manifest.json",
+      "allowPrerelease": false
+    },
+    {
+      "id": "lab",
+      "name": "Lab",
+      "manifestUrl": "https://its-ze.github.io/tabforge-cyberdeck/manifest-lab.json",
+      "allowPrerelease": true
+    }
+  ],
+  "policy": {
+    "requireSha256": true,
+    "requireVersionIncrease": true,
+    "requireUserButtonConfirm": true,
+    "neverFlashCompanionWithoutProfileBackup": true,
+    "neverPublishPrivateMeshMaterial": true
+  }
+}

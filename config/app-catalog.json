@@ -1,0 +1,128 @@
+{
+  "schema": "tabforge.app-catalog.v0",
+  "deckName": "TabForge Cyberdeck",
+  "version": "0.1.0",
+  "defaultMode": "meshtastic",
+  "apps": [
+    {
+      "id": "mesh-dashboard",
+      "name": "Mesh Dashboard",
+      "group": "mesh",
+      "status": "active",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["node-status", "radio-health", "channel-summary", "message-rx"]
+    },
+    {
+      "id": "mode-switch",
+      "name": "Mode Switch",
+      "group": "mesh",
+      "status": "active",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["select-meshtastic", "select-meshcore", "preserve-profile", "reconnect-transport"]
+    },
+    {
+      "id": "meshtastic-console",
+      "name": "Meshtastic Console",
+      "group": "mesh",
+      "status": "active",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["text-send", "direct-send", "node-list", "canned-message", "gps-handoff", "serial-api"]
+    },
+    {
+      "id": "meshcore-console",
+      "name": "MeshCore Console",
+      "group": "mesh",
+      "status": "planned",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["command-line", "contacts", "rooms", "start-ota", "ota-upload-assist"]
+    },
+    {
+      "id": "c6l-manager",
+      "name": "C6L Manager",
+      "group": "devices",
+      "status": "active",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["usb-cdc", "ble-profile", "oled-status", "button-event", "buzzer-test", "rgb-led"]
+    },
+    {
+      "id": "tdeck-link",
+      "name": "T-Deck Link",
+      "group": "devices",
+      "status": "active",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["serial-discovery", "zdeck-status", "launcher-event", "safe-ota", "no-littlefs-default"]
+    },
+    {
+      "id": "ir-lab",
+      "name": "IR Lab",
+      "group": "tools",
+      "status": "active",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["ir-learn", "ir-send", "nec-profile", "macro-record", "short-range-check"]
+    },
+    {
+      "id": "mic-deck",
+      "name": "Mic Deck",
+      "group": "tools",
+      "status": "active",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["push-to-record", "wav-to-sd", "sound-meter", "voice-macro", "ptt-metadata"]
+    },
+    {
+      "id": "field-notes",
+      "name": "Field Notes",
+      "group": "data",
+      "status": "active",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["sd-notes", "event-log", "export-redacted", "location-optional"]
+    },
+    {
+      "id": "usb-host",
+      "name": "USB Host",
+      "group": "ports",
+      "status": "active",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["keyboard", "mouse", "cdc-serial", "mass-storage", "device-picker"]
+    },
+    {
+      "id": "rs485-console",
+      "name": "RS485 Console",
+      "group": "ports",
+      "status": "planned",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["baud-select", "terminal", "modbus-scan", "terminator-warning"]
+    },
+    {
+      "id": "camera-watch",
+      "name": "Camera Watch",
+      "group": "sensors",
+      "status": "planned",
+      "surfaces": ["tab5"],
+      "capabilities": ["preview", "snapshot-to-sd", "qr-read", "device-label-scan"]
+    },
+    {
+      "id": "imu-gestures",
+      "name": "IMU Gestures",
+      "group": "sensors",
+      "status": "planned",
+      "surfaces": ["tab5"],
+      "capabilities": ["orientation", "shake-wake", "tilt-shortcuts", "motion-log"]
+    },
+    {
+      "id": "update-center",
+      "name": "Update Center",
+      "group": "system",
+      "status": "active",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["github-pages-manifest", "sha256-check", "ota-apply", "companion-update-assist", "rollback-note"]
+    },
+    {
+      "id": "power-center",
+      "name": "Power Center",
+      "group": "system",
+      "status": "planned",
+      "surfaces": ["tab5", "web-preview"],
+      "capabilities": ["battery", "charge-state", "runtime-estimate", "low-power-profile"]
+    }
+  ]
+}
