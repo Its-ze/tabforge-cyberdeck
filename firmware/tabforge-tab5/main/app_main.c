@@ -119,6 +119,18 @@ typedef enum {
     USB_STATE_ERROR,
 } usb_state_t;
 
+typedef enum {
+    NAV_PAGE_APPS,
+    NAV_PAGE_SETTINGS,
+    NAV_PAGE_UPDATE,
+} nav_page_t;
+
+typedef struct {
+    lv_obj_t *button;
+    lv_obj_t *icon;
+    lv_obj_t *label;
+} nav_button_refs_t;
+
 typedef struct {
     lv_obj_t *status_label;
     lv_obj_t *sd_label;
@@ -139,6 +151,14 @@ typedef struct {
     lv_obj_t *activity_detail_label;
     lv_obj_t *dock_mode_label;
     lv_obj_t *dock_auto_label;
+    lv_obj_t *page_apps;
+    lv_obj_t *page_settings;
+    lv_obj_t *page_update;
+    nav_button_refs_t nav_apps;
+    nav_button_refs_t nav_settings;
+    nav_button_refs_t nav_mode;
+    nav_button_refs_t nav_auto;
+    nav_button_refs_t nav_update;
     lv_obj_t *heap_bar;
     lv_obj_t *psram_bar;
     lv_obj_t *mic_bar;
@@ -163,6 +183,7 @@ static uint8_t g_pending_rotation_count;
 static bool g_auto_rotate = true;
 static bool g_sd_ready;
 static bool g_meshcore_mode;
+static nav_page_t g_nav_page = NAV_PAGE_APPS;
 static uint32_t g_heartbeat_count;
 static bool g_ext_power_ready;
 static esp_err_t g_ext_power_error = ESP_OK;
@@ -452,14 +473,16 @@ static lv_obj_t *make_button(lv_obj_t *parent, lv_coord_t width, const char *lab
     return label;
 }
 
-static lv_obj_t *make_nav_button(lv_obj_t *parent,
-                                 lv_coord_t width,
-                                 const char *icon_text,
-                                 const char *label_text,
-                                 lv_event_cb_t cb)
+static nav_button_refs_t make_nav_button(lv_obj_t *parent,
+                                         lv_coord_t width,
+                                         const char *icon_text,
+                                         const char *label_text,
+                                         lv_event_cb_t cb)
 {
+    nav_button_refs_t refs = {0};
     lv_obj_t *button = lv_button_create(parent);
-    lv_obj_set_size(button, width, 58);
+    refs.button = button;
+    lv_obj_set_size(button, width, 68);
     lv_obj_set_style_radius(button, 8, 0);
     lv_obj_set_style_bg_color(button, color_hex(0x151b20), 0);
     lv_obj_set_style_border_width(button, 0, 0);
@@ -467,22 +490,30 @@ static lv_obj_t *make_nav_button(lv_obj_t *parent,
     lv_obj_set_flex_flow(button, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(button, 3, 0);
+    lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(button, cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *icon = lv_label_create(button);
+    refs.icon = icon;
     lv_label_set_text(icon, icon_text);
     lv_obj_set_style_text_color(icon, color_hex(0x6ee7a2), 0);
     lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_align(icon, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_add_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(icon, cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *label = lv_label_create(button);
+    refs.label = label;
     lv_label_set_text(label, label_text);
     lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(label, width - 8);
     lv_obj_set_style_text_color(label, color_hex(0xf1f7f3), 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
-    return label;
+    lv_obj_add_flag(label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(label, cb, LV_EVENT_CLICKED, NULL);
+    return refs;
 }
 
 static lv_obj_t *add_stat_card(lv_obj_t *parent,
@@ -523,6 +554,72 @@ static void set_activity(const char *title, const char *detail)
     }
 }
 
+static void set_obj_hidden(lv_obj_t *obj, bool hidden)
+{
+    if (obj == NULL) {
+        return;
+    }
+
+    if (hidden) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void style_nav_button(const nav_button_refs_t *nav, bool active, uint32_t accent)
+{
+    if (nav == NULL || nav->button == NULL) {
+        return;
+    }
+
+    uint32_t bg = active ? 0x20312b : 0x151b20;
+    uint32_t text = active ? 0xf1f7f3 : 0x93a6ad;
+    uint32_t icon = active ? accent : 0x6ee7a2;
+
+    lv_obj_set_style_bg_color(nav->button, color_hex(bg), 0);
+    lv_obj_set_style_border_width(nav->button, active ? 1 : 0, 0);
+    lv_obj_set_style_border_color(nav->button, color_hex(accent), 0);
+    if (nav->icon != NULL) {
+        lv_obj_set_style_text_color(nav->icon, color_hex(icon), 0);
+    }
+    if (nav->label != NULL) {
+        lv_obj_set_style_text_color(nav->label, color_hex(text), 0);
+    }
+}
+
+static void refresh_nav_styles(void)
+{
+    style_nav_button(&g_ui.nav_apps, g_nav_page == NAV_PAGE_APPS, 0x6ee7a2);
+    style_nav_button(&g_ui.nav_settings, g_nav_page == NAV_PAGE_SETTINGS, 0x61d5f0);
+    style_nav_button(&g_ui.nav_mode, g_meshcore_mode, 0xf0bf4f);
+    style_nav_button(&g_ui.nav_auto, g_auto_rotate, 0x77dd88);
+    style_nav_button(&g_ui.nav_update, g_nav_page == NAV_PAGE_UPDATE, 0xffc857);
+}
+
+static void show_nav_page(nav_page_t page)
+{
+    g_nav_page = page;
+    set_obj_hidden(g_ui.page_apps, page != NAV_PAGE_APPS);
+    set_obj_hidden(g_ui.page_settings, page != NAV_PAGE_SETTINGS);
+    set_obj_hidden(g_ui.page_update, page != NAV_PAGE_UPDATE);
+
+    switch (page) {
+    case NAV_PAGE_SETTINGS:
+        set_activity("Settings", "Touch-ready controls: mesh profile, rotation, add-on power, SD, audio, USB, and OTA status.");
+        break;
+    case NAV_PAGE_UPDATE:
+        set_activity("Update Center", "GitHub Pages manifest selected. OTA staging waits for explicit button confirmation.");
+        break;
+    case NAV_PAGE_APPS:
+    default:
+        set_activity("Apps", "Launcher grid active: Meshtastic, MeshCore, T-Deck, IR, mic, USB, SD, and updates.");
+        break;
+    }
+
+    refresh_nav_styles();
+}
+
 static void refresh_mode_widgets(void)
 {
     if (g_ui.status_label != NULL) {
@@ -543,6 +640,8 @@ static void refresh_mode_widgets(void)
     if (g_ui.dock_mode_label != NULL) {
         lv_label_set_text(g_ui.dock_mode_label, g_meshcore_mode ? "Mesh" : "Core");
     }
+
+    refresh_nav_styles();
 }
 
 static void refresh_rotation_widgets(void)
@@ -558,6 +657,8 @@ static void refresh_rotation_widgets(void)
     if (g_ui.dock_auto_label != NULL) {
         lv_label_set_text(g_ui.dock_auto_label, g_auto_rotate ? "Auto" : "Locked");
     }
+
+    refresh_nav_styles();
 }
 
 static void refresh_live_stats_locked(void)
@@ -779,7 +880,7 @@ static void update_button_event_cb(lv_event_t *event)
         return;
     }
 
-    set_activity("Update Center", "Ready to fetch GitHub Pages manifest and stage OTA with button confirm.");
+    show_nav_page(NAV_PAGE_UPDATE);
     append_event("update_center_selected");
     ESP_LOGI(TABFORGE_TAG, "update center selected: %s", TABFORGE_MANIFEST_URL);
 }
@@ -790,7 +891,7 @@ static void apps_button_event_cb(lv_event_t *event)
         return;
     }
 
-    set_activity("Apps", "Launcher grid active: Meshtastic, MeshCore, T-Deck, IR, mic, USB, SD, and updates.");
+    show_nav_page(NAV_PAGE_APPS);
     append_event("apps_button_selected");
     ESP_LOGI(TABFORGE_TAG, "apps button selected");
 }
@@ -801,7 +902,7 @@ static void settings_button_event_cb(lv_event_t *event)
         return;
     }
 
-    set_activity("Settings", "System controls ready: mesh mode, auto-rotate, add-on power, SD, audio, and OTA status.");
+    show_nav_page(NAV_PAGE_SETTINGS);
     append_event("settings_button_selected");
     ESP_LOGI(TABFORGE_TAG, "settings button selected");
 }
