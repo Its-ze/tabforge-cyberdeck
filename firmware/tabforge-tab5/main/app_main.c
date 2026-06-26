@@ -155,14 +155,12 @@ static lv_obj_t *make_panel(lv_obj_t *parent, lv_coord_t width, lv_coord_t heigh
 
 static void add_label(lv_obj_t *parent, const char *text, uint32_t color, int font_large)
 {
+    (void)font_large;
+
     lv_obj_t *label = lv_label_create(parent);
     lv_label_set_text(label, text);
     lv_obj_set_style_text_color(label, color_hex(color), 0);
-    if (font_large) {
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_24, 0);
-    } else {
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_16, 0);
-    }
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
 }
 
 static void add_tile(lv_obj_t *parent, const feature_tile_t *tile)
@@ -183,7 +181,7 @@ static void add_tile(lv_obj_t *parent, const feature_tile_t *tile)
     lv_obj_t *status = lv_label_create(box);
     lv_label_set_text(status, state_text(tile->state));
     lv_obj_set_style_text_color(status, tile->state == FEATURE_ACTIVE ? color_hex(0x5ce08a) : color_hex(0xe9ca60), 0);
-    lv_obj_set_style_text_font(status, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(status, &lv_font_montserrat_14, 0);
 }
 
 static void build_dashboard(lv_obj_t *screen)
@@ -211,7 +209,7 @@ static void build_dashboard(lv_obj_t *screen)
     g_status_label = lv_label_create(status_box);
     lv_label_set_text_fmt(g_status_label, "Version %s | Mode MESHTASTIC | USB CDC READY", TABFORGE_VERSION);
     lv_obj_set_style_text_color(g_status_label, color_hex(0x5ce08a), 0);
-    lv_obj_set_style_text_font(g_status_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(g_status_label, &lv_font_montserrat_14, 0);
     g_sd_label = lv_label_create(status_box);
     lv_label_set_text(g_sd_label, g_sd_ready ? "SD mounted: /tabforge config/log folders ready" : "SD not mounted: insert card and reboot");
     lv_obj_set_style_text_color(g_sd_label, g_sd_ready ? color_hex(0x6ed6e8) : color_hex(0xff786d), 0);
