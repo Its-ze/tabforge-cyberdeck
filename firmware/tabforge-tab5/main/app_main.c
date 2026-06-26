@@ -401,11 +401,12 @@ void app_main(void)
     log_boot_status();
     init_sdcard();
 
-    bsp_display_start();
+    lv_display_t *display = bsp_display_start();
     bsp_display_backlight_on();
 
     bsp_display_lock(0);
-    lv_obj_t *screen = lv_screen_active();
+    bsp_display_rotate(display, LV_DISPLAY_ROTATION_90);
+    lv_obj_t *screen = lv_display_get_screen_active(display);
     build_dashboard(screen);
     bsp_display_unlock();
 

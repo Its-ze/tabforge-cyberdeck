@@ -9,7 +9,7 @@ idf.py set-target esp32p4
 idf.py build
 ```
 
-The installed firmware uses the official M5Stack Tab5 ESP-BSP, starts LVGL, shows a TabForge dashboard, mounts the SD card, creates runtime folders/config under `/sdcard/tabforge`, probes the onboard microphone, and provides a touch button to switch the active Meshtastic/MeshCore profile label.
+The installed firmware uses the official M5Stack Tab5 ESP-BSP, starts LVGL in landscape orientation, shows a TabForge dashboard, mounts the SD card, creates runtime folders/config under `/sdcard/tabforge`, probes the onboard microphone, and provides a touch button to switch the active Meshtastic/MeshCore profile label.
 
 ## Runtime Paths
 
