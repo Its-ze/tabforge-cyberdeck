@@ -86,6 +86,8 @@
 #define GROVE_UART_BAUDRATE 115200
 #define GROVE_UART_RX_BUF_SIZE 2048
 #define GROVE_UART_READ_CHUNK 128
+#define TABFORGE_SD_MAX_FILES 8
+#define TABFORGE_SD_ALLOC_UNIT_SIZE (16 * 1024)
 
 typedef enum {
     FEATURE_ACTIVE,
@@ -182,6 +184,8 @@ static lv_disp_rotation_t g_pending_rotation = LV_DISPLAY_ROTATION_90;
 static uint8_t g_pending_rotation_count;
 static bool g_auto_rotate = true;
 static bool g_sd_ready;
+static bool g_sd_recovered;
+static esp_err_t g_sd_last_error = ESP_OK;
 static bool g_meshcore_mode;
 static nav_page_t g_nav_page = NAV_PAGE_APPS;
 static uint32_t g_heartbeat_count;
@@ -402,13 +406,56 @@ static void append_event(const char *event)
     fclose(f);
 }
 
+static esp_err_t mount_sdcard_with_config(bool format_if_mount_failed)
+{
+    const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = format_if_mount_failed,
+        .max_files = TABFORGE_SD_MAX_FILES,
+        .allocation_unit_size = TABFORGE_SD_ALLOC_UNIT_SIZE,
+    };
+    bsp_sdcard_cfg_t cfg = {
+        .mount = &mount_config,
+    };
+
+    return bsp_sdcard_sdmmc_mount(&cfg);
+}
+
+static void write_sd_recovery_marker(void)
+{
+    FILE *f = fopen(TABFORGE_SD_ROOT "/tabforge/SD_RECOVERY.txt", "w");
+    if (f == NULL) {
+        ESP_LOGW(TABFORGE_TAG, "could not create SD recovery marker");
+        return;
+    }
+
+    fprintf(f,
+            "TabForge recovered this SD card filesystem on boot.\n"
+            "Firmware: %s\n"
+            "Runtime root: /tabforge\n",
+            TABFORGE_VERSION);
+    fclose(f);
+}
+
 static void init_sdcard(void)
 {
-    esp_err_t err = bsp_sdcard_mount();
+    g_sd_recovered = false;
+    esp_err_t err = mount_sdcard_with_config(false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "SD mount failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TABFORGE_TAG, "retrying SD mount with filesystem recovery enabled");
+        (void)bsp_sdcard_unmount();
+        err = mount_sdcard_with_config(true);
+        g_sd_recovered = (err == ESP_OK);
+        if (g_sd_recovered) {
+            ESP_LOGW(TABFORGE_TAG, "SD filesystem recovered; previous card contents may have been erased");
+        }
+    }
+
+    g_sd_last_error = err;
     g_sd_ready = (err == ESP_OK);
 
     if (!g_sd_ready) {
-        ESP_LOGW(TABFORGE_TAG, "SD mount failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TABFORGE_TAG, "SD recovery failed: %s", esp_err_to_name(err));
         return;
     }
 
@@ -418,11 +465,16 @@ static void init_sdcard(void)
     ensure_dir(TABFORGE_SD_ROOT "/tabforge/ir");
     ensure_dir(TABFORGE_SD_ROOT "/tabforge/logs");
     write_default_config_if_missing();
-    append_event("boot");
+    if (g_sd_recovered) {
+        write_sd_recovery_marker();
+    }
+    append_event(g_sd_recovered ? "sd_recovered_boot" : "boot");
 
     sdmmc_card_t *card = bsp_sdcard_get_handle();
     if (card != NULL) {
-        ESP_LOGI(TABFORGE_TAG, "SD mounted: %s", card->cid.name);
+        ESP_LOGI(TABFORGE_TAG, "SD mounted%s: %s",
+                 g_sd_recovered ? " after recovery" : "",
+                 card->cid.name);
     }
 }
 
@@ -697,7 +749,7 @@ static void refresh_live_stats_locked(void)
     }
 
     if (g_ui.sd_label != NULL) {
-        lv_label_set_text(g_ui.sd_label, g_sd_ready ? "mounted" : "mount fail");
+        lv_label_set_text(g_ui.sd_label, g_sd_ready ? (g_sd_recovered ? "recovered" : "mounted") : "mount fail");
         lv_obj_set_style_text_color(g_ui.sd_label, g_sd_ready ? color_hex(0x6ee7a2) : color_hex(0xff7a66), 0);
     }
 
@@ -1074,14 +1126,15 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
     lv_coord_t columns = landscape ? 3 : 2;
     lv_coord_t card_w = (width - ((columns - 1) * 10)) / columns;
     lv_coord_t card_h = landscape ? 86 : 96;
-    char mode_value[48];
+    char sd_value[48];
     char rotation_value[48];
     char power_value[48];
     char usb_value[48];
     char grove_value[48];
     char mic_value[48];
 
-    snprintf(mode_value, sizeof(mode_value), "%s profile", active_mode_name());
+    snprintf(sd_value, sizeof(sd_value), "%s",
+             g_sd_ready ? (g_sd_recovered ? "recovered" : "mounted") : esp_err_to_name(g_sd_last_error));
     snprintf(rotation_value, sizeof(rotation_value), "%s at %d deg",
              g_auto_rotate ? "Auto" : "Locked",
              rotation_degrees(g_rotation));
@@ -1093,7 +1146,7 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
              g_ir_probe_ready ? "ready" : "wait");
     snprintf(mic_value, sizeof(mic_value), "%s", mic_state_text());
 
-    add_info_tile(grid, "Mesh", mode_value, "Meshtastic and MeshCore switch lives here.", card_w, card_h, 0x61d5f0);
+    add_info_tile(grid, "SD", sd_value, "Creates /tabforge config, logs, audio, backups, and IR folders.", card_w, card_h, 0x61d5f0);
     add_info_tile(grid, "Rotation", rotation_value, "Gyro auto-rotate can be locked from the dock.", card_w, card_h, 0x77dd88);
     add_info_tile(grid, "Power", power_value, "M5-Bus, Grove, and GPIO_EXT 5V rail.", card_w, card_h, 0xffc857);
     add_info_tile(grid, "USB Host", usb_value, "CDC serial scanner for C6L and T-Deck links.", card_w, card_h, 0x70a7ff);
@@ -1706,7 +1759,7 @@ static void heartbeat_task(void *arg)
         ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s usb=%s usb_rx=%lu grove_rx=%lu/%lu ir_edges=%lu rotation=%s",
                  (unsigned long)g_heartbeat_count++,
                  active_mode_name(),
-                 g_sd_ready ? "ready" : "missing",
+                 g_sd_ready ? (g_sd_recovered ? "recovered" : "ready") : "missing",
                  g_imu_ready ? "ready" : "pending",
                  mic_state_text(),
                  usb_state_text(),
