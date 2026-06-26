@@ -5,6 +5,8 @@ idf_component_register(
         "."
     REQUIRES
         app_update
+        driver
+        esp_io_expander
         esp_event
         esp_netif
         esp_timer
@@ -12,6 +14,8 @@ idf_component_register(
         heap
         m5stack_tab5
         nvs_flash
+        usb
+        usb_host_cdc_acm
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE

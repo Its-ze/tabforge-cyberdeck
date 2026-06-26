@@ -6,6 +6,7 @@
 #include <sys/unistd.h>
 
 #include "bsp/esp-bsp.h"
+#include "driver/gpio.h"
 #include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -1291,6 +1292,7 @@ void app_main(void)
     init_network_stack();
     log_boot_status();
     init_sdcard();
+    init_expansion_power();
 
     g_display = bsp_display_start();
     bsp_display_backlight_on();
@@ -1305,6 +1307,8 @@ void app_main(void)
 
     init_imu();
 
+    xTaskCreate(usb_cdc_task, "tabforge-usb-cdc", 8192, NULL, 6, NULL);
+    xTaskCreate(ir_probe_task, "tabforge-ir-probe", 4096, NULL, 4, NULL);
     xTaskCreate(heartbeat_task, "tabforge-heartbeat", 4096, NULL, 5, NULL);
     xTaskCreate(mic_monitor_task, "tabforge-mic-monitor", 6144, NULL, 4, NULL);
     xTaskCreate(stats_task, "tabforge-stats", 6144, NULL, 4, NULL);

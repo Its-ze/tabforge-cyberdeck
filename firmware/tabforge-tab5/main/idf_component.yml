@@ -1,7 +1,8 @@
-version: "0.1.3"
+version: "0.1.4"
 description: "TabForge Cyberdeck Tab5 firmware shell"
 targets:
   - esp32p4
 dependencies:
   idf: ">=5.4"
   espressif/m5stack_tab5: "*"
+  espressif/usb_host_cdc_acm: "^2"
