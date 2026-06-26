@@ -468,7 +468,7 @@ static void refresh_mode_widgets(void)
     }
 
     if (g_ui.dock_mode_label != NULL) {
-        lv_label_set_text(g_ui.dock_mode_label, g_meshcore_mode ? "Use Meshtastic" : "Use MeshCore");
+        lv_label_set_text(g_ui.dock_mode_label, g_meshcore_mode ? "Meshtastic" : "MeshCore");
     }
 }
 
@@ -483,7 +483,7 @@ static void refresh_rotation_widgets(void)
     }
 
     if (g_ui.dock_auto_label != NULL) {
-        lv_label_set_text(g_ui.dock_auto_label, g_auto_rotate ? "Auto Rotate On" : "Auto Rotate Off");
+        lv_label_set_text(g_ui.dock_auto_label, g_auto_rotate ? "Rotate On" : "Rotate Off");
     }
 }
 
@@ -696,6 +696,28 @@ static void update_button_event_cb(lv_event_t *event)
     ESP_LOGI(TABFORGE_TAG, "update center selected: %s", TABFORGE_MANIFEST_URL);
 }
 
+static void apps_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    set_activity("Apps", "Launcher grid active: Meshtastic, MeshCore, T-Deck, IR, mic, USB, SD, and updates.");
+    append_event("apps_button_selected");
+    ESP_LOGI(TABFORGE_TAG, "apps button selected");
+}
+
+static void settings_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    set_activity("Settings", "System controls ready: mesh mode, auto-rotate, add-on power, SD, audio, and OTA status.");
+    append_event("settings_button_selected");
+    ESP_LOGI(TABFORGE_TAG, "settings button selected");
+}
+
 static void build_top_bar(lv_obj_t *screen, lv_coord_t width, lv_coord_t height, bool landscape)
 {
     lv_obj_t *top = make_panel(screen, width, height, 0x11171c, 0x26333b);
@@ -809,10 +831,12 @@ static void build_dock(lv_obj_t *screen, lv_coord_t width, lv_coord_t height)
     lv_obj_set_flex_flow(dock, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(dock, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    lv_coord_t button_w = (width - 52) / 3;
-    g_ui.dock_mode_label = make_button(dock, button_w, "Use MeshCore", mode_button_event_cb);
-    g_ui.dock_auto_label = make_button(dock, button_w, "Auto Rotate On", auto_rotate_button_event_cb);
-    make_button(dock, button_w, "Update Center", update_button_event_cb);
+    lv_coord_t button_w = (width - 72) / 5;
+    make_button(dock, button_w, "Apps", apps_button_event_cb);
+    make_button(dock, button_w, "Settings", settings_button_event_cb);
+    g_ui.dock_mode_label = make_button(dock, button_w, "MeshCore", mode_button_event_cb);
+    g_ui.dock_auto_label = make_button(dock, button_w, "Rotate On", auto_rotate_button_event_cb);
+    make_button(dock, button_w, "Update", update_button_event_cb);
 }
 
 static void build_dashboard(lv_obj_t *screen)
