@@ -28,6 +28,43 @@
 #define TABFORGE_VERSION "0.1.0"
 #endif
 
+#ifndef LV_SYMBOL_ENVELOPE
+#define LV_SYMBOL_ENVELOPE "[MSG]"
+#endif
+#ifndef LV_SYMBOL_WIFI
+#define LV_SYMBOL_WIFI "[RF]"
+#endif
+#ifndef LV_SYMBOL_SHUFFLE
+#define LV_SYMBOL_SHUFFLE "[MESH]"
+#endif
+#ifndef LV_SYMBOL_KEYBOARD
+#define LV_SYMBOL_KEYBOARD "[KEY]"
+#endif
+#ifndef LV_SYMBOL_EYE_OPEN
+#define LV_SYMBOL_EYE_OPEN "[IR]"
+#endif
+#ifndef LV_SYMBOL_AUDIO
+#define LV_SYMBOL_AUDIO "[MIC]"
+#endif
+#ifndef LV_SYMBOL_USB
+#define LV_SYMBOL_USB "[USB]"
+#endif
+#ifndef LV_SYMBOL_SD_CARD
+#define LV_SYMBOL_SD_CARD "[SD]"
+#endif
+#ifndef LV_SYMBOL_DOWNLOAD
+#define LV_SYMBOL_DOWNLOAD "[OTA]"
+#endif
+#ifndef LV_SYMBOL_LIST
+#define LV_SYMBOL_LIST "[APPS]"
+#endif
+#ifndef LV_SYMBOL_SETTINGS
+#define LV_SYMBOL_SETTINGS "[SET]"
+#endif
+#ifndef LV_SYMBOL_REFRESH
+#define LV_SYMBOL_REFRESH "[ROT]"
+#endif
+
 #define TABFORGE_TAG "TabForge"
 #define TABFORGE_SD_ROOT BSP_SD_MOUNT_POINT
 #define TABFORGE_CONFIG_PATH TABFORGE_SD_ROOT "/tabforge/config.json"
@@ -108,14 +145,14 @@ typedef struct {
 } ui_refs_t;
 
 static const feature_tile_t g_tiles[] = {
-    {"MSG", "Meshtastic", "C6L serial dashboard, node status, channel text, direct sends.", "USB CDC", "tile_meshtastic", FEATURE_ACTIVE, 0x43d17a},
-    {"CORE", "MeshCore", "Switchable command profile for MeshCore console work.", "Profile", "tile_meshcore", FEATURE_ACTIVE, 0x61d5f0},
-    {"TDEK", "T-Deck Link", "Companion status bridge for the LilyGO T-Deck/Z-Deck flow.", "Bridge", "tile_tdeck", FEATURE_ACTIVE, 0xf0bf4f},
-    {"IR", "IR Lab", "Learn, label, replay, and store IR macros on SD.", "38 kHz", "tile_ir", FEATURE_ACTIVE, 0xff7a66},
-    {"MIC", "Mic Deck", "Live level meter now, push-to-record WAV flow next.", "Live", "tile_mic", FEATURE_ACTIVE, 0xb982ff},
-    {"USB", "USB Bay", "Host-side CDC, keyboard, mouse, and storage workbench.", "Host", "tile_usb", FEATURE_ACTIVE, 0x70a7ff},
-    {"LOG", "SD Field Log", "Runtime config, event journal, audio, IR, and backups.", "SD", "tile_sd", FEATURE_ACTIVE, 0x77dd88},
-    {"OTA", "Update Center", "GitHub manifest, SHA256 package checks, and confirm button.", "Stable", "tile_update", FEATURE_ACTIVE, 0xffc857},
+    {LV_SYMBOL_ENVELOPE, "Meshtastic", "C6L serial dashboard, node status, channel text, direct sends.", "USB CDC", "tile_meshtastic", FEATURE_ACTIVE, 0x43d17a},
+    {LV_SYMBOL_SHUFFLE, "MeshCore", "Switchable command profile for MeshCore console work.", "Profile", "tile_meshcore", FEATURE_ACTIVE, 0x61d5f0},
+    {LV_SYMBOL_KEYBOARD, "T-Deck Link", "Companion status bridge for the LilyGO T-Deck/Z-Deck flow.", "Bridge", "tile_tdeck", FEATURE_ACTIVE, 0xf0bf4f},
+    {LV_SYMBOL_EYE_OPEN, "IR Lab", "Learn, label, replay, and store IR macros on SD.", "38 kHz", "tile_ir", FEATURE_ACTIVE, 0xff7a66},
+    {LV_SYMBOL_AUDIO, "Mic Deck", "Live level meter now, push-to-record WAV flow next.", "Live", "tile_mic", FEATURE_ACTIVE, 0xb982ff},
+    {LV_SYMBOL_USB, "USB Bay", "Host-side CDC, keyboard, mouse, and storage workbench.", "Host", "tile_usb", FEATURE_ACTIVE, 0x70a7ff},
+    {LV_SYMBOL_SD_CARD, "SD Field Log", "Runtime config, event journal, audio, IR, and backups.", "SD", "tile_sd", FEATURE_ACTIVE, 0x77dd88},
+    {LV_SYMBOL_DOWNLOAD, "Update Center", "GitHub manifest, SHA256 package checks, and confirm button.", "Stable", "tile_update", FEATURE_ACTIVE, 0xffc857},
 };
 
 static ui_refs_t g_ui;
@@ -406,8 +443,11 @@ static lv_obj_t *make_button(lv_obj_t *parent, lv_coord_t width, const char *lab
 
     lv_obj_t *label = lv_label_create(button);
     lv_label_set_text(label, label_text);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(label, width - 10);
     lv_obj_set_style_text_color(label, color_hex(0xf1f7f3), 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(label);
     return label;
 }
@@ -468,7 +508,7 @@ static void refresh_mode_widgets(void)
     }
 
     if (g_ui.dock_mode_label != NULL) {
-        lv_label_set_text(g_ui.dock_mode_label, g_meshcore_mode ? "Meshtastic" : "MeshCore");
+        lv_label_set_text(g_ui.dock_mode_label, g_meshcore_mode ? LV_SYMBOL_WIFI " Mesh" : LV_SYMBOL_SHUFFLE " Core");
     }
 }
 
@@ -483,7 +523,7 @@ static void refresh_rotation_widgets(void)
     }
 
     if (g_ui.dock_auto_label != NULL) {
-        lv_label_set_text(g_ui.dock_auto_label, g_auto_rotate ? "Rotate On" : "Rotate Off");
+        lv_label_set_text(g_ui.dock_auto_label, g_auto_rotate ? LV_SYMBOL_REFRESH " On" : LV_SYMBOL_REFRESH " Off");
     }
 }
 
@@ -832,11 +872,11 @@ static void build_dock(lv_obj_t *screen, lv_coord_t width, lv_coord_t height)
     lv_obj_set_flex_align(dock, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     lv_coord_t button_w = (width - 72) / 5;
-    make_button(dock, button_w, "Apps", apps_button_event_cb);
-    make_button(dock, button_w, "Settings", settings_button_event_cb);
-    g_ui.dock_mode_label = make_button(dock, button_w, "MeshCore", mode_button_event_cb);
-    g_ui.dock_auto_label = make_button(dock, button_w, "Rotate On", auto_rotate_button_event_cb);
-    make_button(dock, button_w, "Update", update_button_event_cb);
+    make_button(dock, button_w, LV_SYMBOL_LIST " Apps", apps_button_event_cb);
+    make_button(dock, button_w, LV_SYMBOL_SETTINGS " Set", settings_button_event_cb);
+    g_ui.dock_mode_label = make_button(dock, button_w, LV_SYMBOL_SHUFFLE " Core", mode_button_event_cb);
+    g_ui.dock_auto_label = make_button(dock, button_w, LV_SYMBOL_REFRESH " On", auto_rotate_button_event_cb);
+    make_button(dock, button_w, LV_SYMBOL_DOWNLOAD " OTA", update_button_event_cb);
 }
 
 static void build_dashboard(lv_obj_t *screen)
@@ -883,9 +923,9 @@ static bool target_rotation_from_accel(lv_disp_rotation_t *target)
     }
 
     if (abs_x > abs_y) {
-        *target = ax > 0.0f ? LV_DISPLAY_ROTATION_270 : LV_DISPLAY_ROTATION_90;
+        *target = ax > 0.0f ? LV_DISPLAY_ROTATION_90 : LV_DISPLAY_ROTATION_270;
     } else {
-        *target = ay > 0.0f ? LV_DISPLAY_ROTATION_180 : LV_DISPLAY_ROTATION_0;
+        *target = ay > 0.0f ? LV_DISPLAY_ROTATION_0 : LV_DISPLAY_ROTATION_180;
     }
 
     return true;

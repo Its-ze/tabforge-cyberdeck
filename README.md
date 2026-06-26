@@ -23,7 +23,7 @@ Included now:
 
 - ESP-IDF Tab5 firmware shell with OTA partitions and a feature registry.
 - Phone/tablet-style Tab5 home UI with a status bar, app tiles, dock controls, live heap/PSRAM/SD/mic/IMU stats, and gyro-assisted auto-rotation.
-- Home-screen dock buttons for Apps, Settings, mesh mode switching, rotation, and updates.
+- Home-screen dock buttons and app tiles use LVGL symbols for Apps, Settings, mesh mode switching, rotation, updates, mesh, IR, audio, USB, and SD.
 - Boot-time add-on bring-up for the Tab5 expansion 5V rail, USB-A host power, USB CDC scan/read counters, corrected Grove IR pins, and a passive Grove UART RX counter for C6L-style serial traffic.
 - Feature catalog for mesh, IR, mic/audio, T-Deck, C6L, USB host, SD, camera, IMU, RS485, and updates.
 - Meshtastic/MeshCore mode-switch contract.
