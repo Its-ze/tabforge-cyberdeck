@@ -24,3 +24,4 @@ Private-Keys/
 node_modules/
 .DS_Store
 Thumbs.db
+.tabforge-preview.pid
