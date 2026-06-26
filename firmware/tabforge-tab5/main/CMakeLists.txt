@@ -21,3 +21,7 @@ idf_component_register(
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     TABFORGE_VERSION="${PROJECT_VER}"
 )
+
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -include tabforge_forward.h
+)
