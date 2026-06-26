@@ -367,6 +367,62 @@ static void format_uptime(char *buffer, size_t buffer_size)
              (unsigned long long)secs);
 }
 
+static int battery_percent_from_mv(int mv)
+{
+    if (mv < TABFORGE_BATTERY_PRESENT_MV || mv <= TABFORGE_BATTERY_MIN_MV) {
+        return 0;
+    }
+    if (mv >= TABFORGE_BATTERY_MAX_MV) {
+        return 100;
+    }
+
+    return ((mv - TABFORGE_BATTERY_MIN_MV) * 100 + ((TABFORGE_BATTERY_MAX_MV - TABFORGE_BATTERY_MIN_MV) / 2)) /
+           (TABFORGE_BATTERY_MAX_MV - TABFORGE_BATTERY_MIN_MV);
+}
+
+static void format_battery_status(char *buffer, size_t buffer_size, bool compact)
+{
+    if (!g_battery_online) {
+        if (compact) {
+            snprintf(buffer, buffer_size, "BAT --");
+        } else {
+            snprintf(buffer, buffer_size, "%s", esp_err_to_name(g_battery_last_error));
+        }
+        return;
+    }
+
+    if (g_battery_mv < TABFORGE_BATTERY_PRESENT_MV) {
+        if (compact) {
+            snprintf(buffer, buffer_size, "USB");
+        } else {
+            snprintf(buffer, buffer_size, "USB power");
+        }
+        return;
+    }
+
+    if (compact) {
+        snprintf(buffer, buffer_size, "BAT %d%%", g_battery_percent);
+    } else {
+        snprintf(buffer, buffer_size, "%d%% | %d.%02dV",
+                 g_battery_percent,
+                 g_battery_mv / 1000,
+                 (g_battery_mv % 1000) / 10);
+    }
+}
+
+static esp_err_t set_expander_output(esp_io_expander_handle_t expander, uint32_t pin, bool level)
+{
+    if (expander == NULL) {
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = ESP_OK;
+    err |= esp_io_expander_set_dir(expander, pin, IO_EXPANDER_OUTPUT);
+    err |= esp_io_expander_set_level(expander, pin, level);
+    err |= esp_io_expander_set_output_mode(expander, pin, IO_EXPANDER_OUTPUT_MODE_PUSH_PULL);
+    return err;
+}
+
 static void ensure_dir(const char *path)
 {
     if (mkdir(path, 0775) != 0 && errno != EEXIST) {
@@ -495,6 +551,77 @@ static void init_sdcard(void)
         ESP_LOGI(TABFORGE_TAG, "SD mounted%s: %s",
                  g_sd_recovered ? " after recovery" : "",
                  card->cid.name);
+    }
+}
+
+static esp_err_t battery_read_u16(uint8_t reg, uint16_t *value)
+{
+    if (g_battery_monitor == NULL || value == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t rx[2] = {0};
+    esp_err_t err = i2c_master_transmit_receive(g_battery_monitor, &reg, 1, rx, sizeof(rx), 100);
+    if (err == ESP_OK) {
+        *value = ((uint16_t)rx[0] << 8) | rx[1];
+    }
+    return err;
+}
+
+static esp_err_t read_battery_sample(void)
+{
+    uint16_t raw_bus_mv = 0;
+    esp_err_t err = battery_read_u16(TABFORGE_BATTERY_REG_BUS_VOLTAGE, &raw_bus_mv);
+    g_battery_last_error = err;
+    if (err != ESP_OK) {
+        g_battery_online = false;
+        return err;
+    }
+
+    g_battery_mv = (int)(((uint32_t)raw_bus_mv * 125U + 50U) / 100U);
+    g_battery_percent = battery_percent_from_mv(g_battery_mv);
+    g_battery_reads++;
+    g_battery_online = true;
+    return ESP_OK;
+}
+
+static void init_battery_monitor(void)
+{
+    esp_err_t err = bsp_i2c_init();
+    if (err != ESP_OK) {
+        g_battery_last_error = err;
+        ESP_LOGW(TABFORGE_TAG, "battery monitor I2C init failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    i2c_master_bus_handle_t bus = bsp_i2c_get_handle();
+    if (bus == NULL) {
+        g_battery_last_error = ESP_FAIL;
+        ESP_LOGW(TABFORGE_TAG, "battery monitor failed: I2C bus unavailable");
+        return;
+    }
+
+    const i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = TABFORGE_BATTERY_I2C_ADDR,
+        .scl_speed_hz = TABFORGE_I2C_SPEED_HZ,
+    };
+
+    err = i2c_master_bus_add_device(bus, &dev_cfg, &g_battery_monitor);
+    if (err != ESP_OK) {
+        g_battery_last_error = err;
+        ESP_LOGW(TABFORGE_TAG, "battery monitor add failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = read_battery_sample();
+    if (err == ESP_OK) {
+        append_event("battery_monitor_started");
+        ESP_LOGI(TABFORGE_TAG, "battery monitor ready: %dmV %d%%",
+                 g_battery_mv,
+                 g_battery_percent);
+    } else {
+        ESP_LOGW(TABFORGE_TAG, "battery monitor read failed: %s", esp_err_to_name(err));
     }
 }
 
@@ -741,7 +868,17 @@ static void refresh_rotation_widgets(void)
 static void refresh_live_stats_locked(void)
 {
     char uptime[32];
+    char battery_status[32];
     format_uptime(uptime, sizeof(uptime));
+    format_battery_status(battery_status, sizeof(battery_status), true);
+
+    if (g_ui.battery_label != NULL) {
+        lv_label_set_text(g_ui.battery_label, battery_status);
+        lv_obj_set_style_text_color(g_ui.battery_label,
+                                    g_battery_online ? color_hex(0x6ee7a2) : color_hex(0xffc857),
+                                    0);
+    }
+
     if (g_ui.uptime_label != NULL) {
         lv_label_set_text(g_ui.uptime_label, uptime);
     }
@@ -774,14 +911,16 @@ static void refresh_live_stats_locked(void)
     }
 
     if (g_ui.addon_label != NULL) {
-        const char *ext = g_ext_power_ready ? "5V on" : "5V err";
+        const char *ext = g_ext_power_ready ? "PA 5V" : "PA err";
+        const char *usb = g_usb_power_ready ? "USB 5V" : "USB err";
         const char *grove = g_grove_uart_ready ? "Grove RX" : (g_ir_probe_ready ? "IR ready" : "Grove wait");
         lv_label_set_text_fmt(g_ui.addon_label,
-                              "%s | %s",
+                              "%s | %s | %s",
                               ext,
+                              usb,
                               grove);
         lv_obj_set_style_text_color(g_ui.addon_label,
-                                    (g_ext_power_ready && g_usb_host_ready) ? color_hex(0x6ee7a2) : color_hex(0xffc857),
+                                    (g_ext_power_ready && g_usb_power_ready && g_usb_host_ready) ? color_hex(0x6ee7a2) : color_hex(0xffc857),
                                     0);
     }
 
@@ -813,7 +952,9 @@ static void refresh_live_stats_locked(void)
     }
 
     if (g_ui.usb_label != NULL) {
-        if (g_usb_state == USB_STATE_OPEN) {
+        if (!g_usb_power_ready) {
+            lv_label_set_text_fmt(g_ui.usb_label, "5V %s", esp_err_to_name(g_usb_power_error));
+        } else if (g_usb_state == USB_STATE_OPEN) {
             uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
             uint64_t age_ms = g_usb_last_rx_ms > 0 ? now_ms - g_usb_last_rx_ms : 0;
             lv_label_set_text_fmt(g_ui.usb_label,
@@ -864,8 +1005,9 @@ static void refresh_live_stats_locked(void)
     }
 
     if (g_ui.heart_label != NULL) {
-        lv_label_set_text_fmt(g_ui.heart_label, "beat %lu | usb drop %lu",
+        lv_label_set_text_fmt(g_ui.heart_label, "beat %lu | %s | drop %lu",
                               (unsigned long)g_heartbeat_count,
+                              battery_status,
                               (unsigned long)g_usb_disconnect_count);
     }
 
@@ -1008,9 +1150,11 @@ static void build_top_bar(lv_obj_t *screen, lv_coord_t width, lv_coord_t height,
     lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    g_ui.status_label = make_text(top, "", 0x6ee7a2, (width * 48) / 100);
-    g_ui.rotation_label = make_text(top, "", 0x93a6ad, (width * 48) / 100);
+    g_ui.status_label = make_text(top, "", 0x6ee7a2, (width * 42) / 100);
+    g_ui.rotation_label = make_text(top, "", 0x93a6ad, (width * 32) / 100);
     lv_obj_set_style_text_align(g_ui.rotation_label, LV_TEXT_ALIGN_RIGHT, 0);
+    g_ui.battery_label = make_text(top, "BAT --", 0xffc857, (width * 20) / 100);
+    lv_obj_set_style_text_align(g_ui.battery_label, LV_TEXT_ALIGN_RIGHT, 0);
 }
 
 static void build_home_header(lv_obj_t *parent, lv_coord_t width, lv_coord_t height)
@@ -1148,19 +1292,25 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
     lv_coord_t card_h = landscape ? 86 : 96;
     char sd_value[48];
     char rotation_value[48];
-    char power_value[48];
+    char power_value[64];
     char usb_value[48];
     char grove_value[48];
     char mic_value[48];
+    char battery_value[48];
 
     snprintf(sd_value, sizeof(sd_value), "%s",
              g_sd_ready ? (g_sd_recovered ? "recovered" : "mounted") : esp_err_to_name(g_sd_last_error));
     snprintf(rotation_value, sizeof(rotation_value), "%s at %d deg",
              g_auto_rotate ? "Auto" : "Locked",
              rotation_degrees(g_rotation));
-    snprintf(power_value, sizeof(power_value), "%s",
-             g_ext_power_ready ? "5V enabled" : esp_err_to_name(g_ext_power_error));
-    snprintf(usb_value, sizeof(usb_value), "%s", usb_state_text());
+    format_battery_status(battery_value, sizeof(battery_value), false);
+    snprintf(power_value, sizeof(power_value), "PA %s | USB %s | CHG %s",
+             g_ext_power_ready ? "on" : "err",
+             g_usb_power_ready ? "on" : "err",
+             g_charge_enable_ready ? "on" : "err");
+    snprintf(usb_value, sizeof(usb_value), "%s | 5V %s",
+             usb_state_text(),
+             g_usb_power_ready ? "on" : esp_err_to_name(g_usb_power_error));
     snprintf(grove_value, sizeof(grove_value), "UART %s | IR %s",
              g_grove_uart_ready ? "ready" : "wait",
              g_ir_probe_ready ? "ready" : "wait");
@@ -1168,7 +1318,7 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
 
     add_info_tile(grid, "SD", sd_value, "Creates /tabforge config, logs, audio, backups, and IR folders.", card_w, card_h, 0x61d5f0);
     add_info_tile(grid, "Rotation", rotation_value, "Gyro auto-rotate can be locked from the dock.", card_w, card_h, 0x77dd88);
-    add_info_tile(grid, "Power", power_value, "M5-Bus, Grove, and GPIO_EXT 5V rail.", card_w, card_h, 0xffc857);
+    add_info_tile(grid, "Power", power_value, battery_value, card_w, card_h, 0xffc857);
     add_info_tile(grid, "USB Host", usb_value, "CDC serial scanner for C6L and T-Deck links.", card_w, card_h, 0x70a7ff);
     add_info_tile(grid, "Grove / IR", grove_value, "GPIO54 RX and GPIO53 TX are armed.", card_w, card_h, 0xff7a66);
     add_info_tile(grid, "Audio", mic_value, "ES7210 mic level monitor runs in the background.", card_w, card_h, 0xb982ff);
@@ -1452,22 +1602,47 @@ static void init_expansion_power(void)
     if (io_expander == NULL) {
         g_ext_power_ready = false;
         g_ext_power_error = ESP_FAIL;
-        ESP_LOGW(TABFORGE_TAG, "expansion 5V enable failed: IO expander unavailable");
+        ESP_LOGW(TABFORGE_TAG, "PA/Grove 5V enable failed: IO expander unavailable");
+    } else {
+        esp_err_t err = set_expander_output(io_expander, TABFORGE_EXT5V_EN, true);
+        g_ext_power_error = err;
+        g_ext_power_ready = (err == ESP_OK);
+
+        if (g_ext_power_ready) {
+            ESP_LOGI(TABFORGE_TAG, "PA/Grove 5V enabled for M5-Bus/Grove/GPIO_EXT");
+            append_event("expansion_5v_enabled");
+        } else {
+            ESP_LOGW(TABFORGE_TAG, "PA/Grove 5V enable failed: %s", esp_err_to_name(err));
+        }
+    }
+
+    esp_io_expander_handle_t power_expander = bsp_io_expander1_init();
+    if (power_expander == NULL) {
+        g_usb_power_ready = false;
+        g_usb_power_error = ESP_FAIL;
+        g_charge_enable_ready = false;
+        g_charge_enable_error = ESP_FAIL;
+        ESP_LOGW(TABFORGE_TAG, "USB-A 5V enable failed: power IO expander unavailable");
         return;
     }
 
-    esp_err_t err = ESP_OK;
-    err |= esp_io_expander_set_dir(io_expander, TABFORGE_EXT5V_EN, IO_EXPANDER_OUTPUT);
-    err |= esp_io_expander_set_level(io_expander, TABFORGE_EXT5V_EN, true);
-    err |= esp_io_expander_set_output_mode(io_expander, TABFORGE_EXT5V_EN, IO_EXPANDER_OUTPUT_MODE_PUSH_PULL);
-    g_ext_power_error = err;
-    g_ext_power_ready = (err == ESP_OK);
-
-    if (g_ext_power_ready) {
-        ESP_LOGI(TABFORGE_TAG, "expansion 5V enabled for M5-Bus/Grove/GPIO_EXT");
-        append_event("expansion_5v_enabled");
+    esp_err_t usb_err = set_expander_output(power_expander, BSP_USB_EN, true);
+    g_usb_power_error = usb_err;
+    g_usb_power_ready = (usb_err == ESP_OK);
+    if (g_usb_power_ready) {
+        ESP_LOGI(TABFORGE_TAG, "USB-A 5V enabled for attached USB add-ons");
+        append_event("usb_5v_enabled");
     } else {
-        ESP_LOGW(TABFORGE_TAG, "expansion 5V enable failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TABFORGE_TAG, "USB-A 5V enable failed: %s", esp_err_to_name(usb_err));
+    }
+
+    esp_err_t charge_err = set_expander_output(power_expander, TABFORGE_CHARGE_ENABLE, true);
+    g_charge_enable_error = charge_err;
+    g_charge_enable_ready = (charge_err == ESP_OK);
+    if (g_charge_enable_ready) {
+        ESP_LOGI(TABFORGE_TAG, "battery charge enable asserted");
+    } else {
+        ESP_LOGW(TABFORGE_TAG, "battery charge enable failed: %s", esp_err_to_name(charge_err));
     }
 }
 
@@ -1653,6 +1828,27 @@ static void mic_monitor_task(void *arg)
     }
 }
 
+static void battery_monitor_task(void *arg)
+{
+    (void)arg;
+
+    while (true) {
+        bool was_online = g_battery_online;
+        esp_err_t err = read_battery_sample();
+        if (err == ESP_OK) {
+            if (!was_online) {
+                ESP_LOGI(TABFORGE_TAG, "battery monitor recovered: %dmV %d%%",
+                         g_battery_mv,
+                         g_battery_percent);
+            }
+        } else if (was_online) {
+            ESP_LOGW(TABFORGE_TAG, "battery monitor lost: %s", esp_err_to_name(err));
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(TABFORGE_BATTERY_POLL_MS));
+    }
+}
+
 static void ir_probe_task(void *arg)
 {
     (void)arg;
@@ -1776,12 +1972,18 @@ static void heartbeat_task(void *arg)
     (void)arg;
 
     while (true) {
-        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s usb=%s usb_rx=%lu grove_rx=%lu/%lu ir_edges=%lu rotation=%s",
+        char battery_status[32];
+        format_battery_status(battery_status, sizeof(battery_status), false);
+        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s pa5v=%s usb5v=%s charge=%s bat=%s usb=%s usb_rx=%lu grove_rx=%lu/%lu ir_edges=%lu rotation=%s",
                  (unsigned long)g_heartbeat_count++,
                  active_mode_name(),
                  g_sd_ready ? (g_sd_recovered ? "recovered" : "ready") : "missing",
                  g_imu_ready ? "ready" : "pending",
                  mic_state_text(),
+                 g_ext_power_ready ? "on" : "err",
+                 g_usb_power_ready ? "on" : "err",
+                 g_charge_enable_ready ? "on" : "err",
+                 battery_status,
                  usb_state_text(),
                  (unsigned long)g_usb_rx_bytes,
                  (unsigned long)g_grove_rx_bytes,
@@ -1800,6 +2002,7 @@ void app_main(void)
     log_boot_status();
     init_sdcard();
     init_expansion_power();
+    init_battery_monitor();
 
     g_display = bsp_display_start();
     bsp_display_backlight_on();
@@ -1816,6 +2019,7 @@ void app_main(void)
 
     xTaskCreate(usb_cdc_task, "tabforge-usb-cdc", 8192, NULL, 6, NULL);
     xTaskCreate(ir_probe_task, "tabforge-ir-probe", 4096, NULL, 4, NULL);
+    xTaskCreate(battery_monitor_task, "tabforge-battery", 4096, NULL, 4, NULL);
     xTaskCreate(heartbeat_task, "tabforge-heartbeat", 4096, NULL, 5, NULL);
     xTaskCreate(mic_monitor_task, "tabforge-mic-monitor", 6144, NULL, 4, NULL);
     xTaskCreate(stats_task, "tabforge-stats", 6144, NULL, 4, NULL);
