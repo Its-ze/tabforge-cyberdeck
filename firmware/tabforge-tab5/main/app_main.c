@@ -7,6 +7,7 @@
 
 #include "bsp/esp-bsp.h"
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "driver/uart.h"
 #include "esp_app_desc.h"
 #include "esp_event.h"
@@ -78,6 +79,7 @@
 #define USB_CDC_BAUDRATE 115200
 #define USB_CDC_SCAN_TIMEOUT_MS 2500
 #define TABFORGE_EXT5V_EN IO_EXPANDER_PIN_NUM_2
+#define TABFORGE_CHARGE_ENABLE IO_EXPANDER_PIN_NUM_7
 #define TABFORGE_GROVE_TX_GPIO GPIO_NUM_53
 #define TABFORGE_GROVE_RX_GPIO GPIO_NUM_54
 #define TABFORGE_IR_TX_GPIO TABFORGE_GROVE_TX_GPIO
@@ -88,6 +90,13 @@
 #define GROVE_UART_READ_CHUNK 128
 #define TABFORGE_SD_MAX_FILES 8
 #define TABFORGE_SD_ALLOC_UNIT_SIZE (16 * 1024)
+#define TABFORGE_I2C_SPEED_HZ 400000
+#define TABFORGE_BATTERY_I2C_ADDR 0x41
+#define TABFORGE_BATTERY_REG_BUS_VOLTAGE 0x02
+#define TABFORGE_BATTERY_PRESENT_MV 5000
+#define TABFORGE_BATTERY_MIN_MV 6000
+#define TABFORGE_BATTERY_MAX_MV 8400
+#define TABFORGE_BATTERY_POLL_MS 10000
 
 typedef enum {
     FEATURE_ACTIVE,
@@ -135,6 +144,7 @@ typedef struct {
 
 typedef struct {
     lv_obj_t *status_label;
+    lv_obj_t *battery_label;
     lv_obj_t *sd_label;
     lv_obj_t *addon_label;
     lv_obj_t *mode_label;
@@ -191,6 +201,10 @@ static nav_page_t g_nav_page = NAV_PAGE_APPS;
 static uint32_t g_heartbeat_count;
 static bool g_ext_power_ready;
 static esp_err_t g_ext_power_error = ESP_OK;
+static bool g_usb_power_ready;
+static esp_err_t g_usb_power_error = ESP_OK;
+static bool g_charge_enable_ready;
+static esp_err_t g_charge_enable_error = ESP_OK;
 static bool g_ir_probe_ready;
 static int g_ir_level = -1;
 static uint32_t g_ir_edges;
@@ -209,6 +223,12 @@ static uint32_t g_usb_rx_bytes;
 static uint64_t g_usb_last_rx_ms;
 static cdc_acm_dev_hdl_t g_usb_cdc_handle;
 static bool g_usb_cdc_disconnected;
+static i2c_master_dev_handle_t g_battery_monitor;
+static bool g_battery_online;
+static esp_err_t g_battery_last_error = ESP_ERR_NOT_FOUND;
+static int g_battery_mv = -1;
+static int g_battery_percent = -1;
+static uint32_t g_battery_reads;
 
 #if BSP_CAPS_IMU
 static sensor_handle_t g_imu_sensor_handle;
