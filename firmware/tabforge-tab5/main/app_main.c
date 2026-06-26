@@ -21,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
 #include "usb/cdc_acm_host.h"
@@ -97,6 +98,9 @@
 #define TABFORGE_BATTERY_MIN_MV 6000
 #define TABFORGE_BATTERY_MAX_MV 8400
 #define TABFORGE_BATTERY_POLL_MS 10000
+#define TABFORGE_NVS_NAMESPACE "tabforge"
+#define TABFORGE_NVS_SCREEN_TIMEOUT_KEY "scr_to_idx"
+#define TABFORGE_SCREEN_WAKE_GRACE_MS 2000
 
 typedef enum {
     FEATURE_ACTIVE,
@@ -137,6 +141,11 @@ typedef enum {
 } nav_page_t;
 
 typedef struct {
+    const char *label;
+    uint32_t seconds;
+} screen_timeout_option_t;
+
+typedef struct {
     lv_obj_t *button;
     lv_obj_t *icon;
     lv_obj_t *label;
@@ -155,6 +164,8 @@ typedef struct {
     lv_obj_t *mic_label;
     lv_obj_t *tilt_label;
     lv_obj_t *heart_label;
+    lv_obj_t *screen_label;
+    lv_obj_t *settings_screen_label;
     lv_obj_t *usb_label;
     lv_obj_t *ir_label;
     lv_obj_t *gyro_label;
@@ -185,6 +196,14 @@ static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_USB, "USB Bay", "Host-side CDC, keyboard, mouse, and storage workbench.", "Host", "tile_usb", FEATURE_ACTIVE, 0x70a7ff},
     {LV_SYMBOL_SD_CARD, "SD Field Log", "Runtime config, event journal, audio, IR, and backups.", "SD", "tile_sd", FEATURE_ACTIVE, 0x77dd88},
     {LV_SYMBOL_DOWNLOAD, "Update Center", "GitHub manifest, SHA256 package checks, and confirm button.", "Stable", "tile_update", FEATURE_ACTIVE, 0xffc857},
+};
+
+static const screen_timeout_option_t g_screen_timeouts[] = {
+    {"Never", 0},
+    {"30 sec", 30},
+    {"1 min", 60},
+    {"2 min", 120},
+    {"5 min", 300},
 };
 
 static ui_refs_t g_ui;
@@ -229,6 +248,13 @@ static esp_err_t g_battery_last_error = ESP_ERR_NOT_FOUND;
 static int g_battery_mv = -1;
 static int g_battery_percent = -1;
 static uint32_t g_battery_reads;
+static uint8_t g_screen_timeout_index = 3;
+static bool g_screen_sleeping;
+static esp_err_t g_screen_power_error = ESP_OK;
+static uint32_t g_screen_sleep_count;
+static uint32_t g_screen_sleep_start_ms;
+static volatile uint32_t g_input_activity_seq;
+static uint32_t g_sleep_input_seq;
 
 #if BSP_CAPS_IMU
 static sensor_handle_t g_imu_sensor_handle;
@@ -367,6 +393,66 @@ static void format_uptime(char *buffer, size_t buffer_size)
              (unsigned long long)secs);
 }
 
+static size_t screen_timeout_count(void)
+{
+    return sizeof(g_screen_timeouts) / sizeof(g_screen_timeouts[0]);
+}
+
+static const screen_timeout_option_t *active_screen_timeout(void)
+{
+    if (g_screen_timeout_index >= screen_timeout_count()) {
+        g_screen_timeout_index = 3;
+    }
+    return &g_screen_timeouts[g_screen_timeout_index];
+}
+
+static const char *screen_timeout_label(void)
+{
+    return active_screen_timeout()->label;
+}
+
+static uint32_t screen_timeout_seconds(void)
+{
+    return active_screen_timeout()->seconds;
+}
+
+static uint32_t now_ms_u32(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+static void format_screen_status(char *buffer, size_t buffer_size)
+{
+    if (g_screen_power_error != ESP_OK) {
+        snprintf(buffer, buffer_size, "err %s", esp_err_to_name(g_screen_power_error));
+        return;
+    }
+
+    snprintf(buffer, buffer_size, "%s | %s",
+             g_screen_sleeping ? "sleep" : "awake",
+             screen_timeout_label());
+}
+
+static void refresh_screen_widgets_locked(void)
+{
+    char screen_status[40];
+    format_screen_status(screen_status, sizeof(screen_status));
+
+    if (g_ui.screen_label != NULL) {
+        lv_label_set_text(g_ui.screen_label, screen_status);
+        lv_obj_set_style_text_color(g_ui.screen_label,
+                                    g_screen_sleeping ? color_hex(0xffc857) : color_hex(0x6ee7a2),
+                                    0);
+    }
+
+    if (g_ui.settings_screen_label != NULL) {
+        lv_label_set_text(g_ui.settings_screen_label, screen_status);
+        lv_obj_set_style_text_color(g_ui.settings_screen_label,
+                                    g_screen_sleeping ? color_hex(0xffc857) : color_hex(0xf1f7f3),
+                                    0);
+    }
+}
+
 static int battery_percent_from_mv(int mv)
 {
     if (mv < TABFORGE_BATTERY_PRESENT_MV || mv <= TABFORGE_BATTERY_MIN_MV) {
@@ -423,6 +509,88 @@ static esp_err_t set_expander_output(esp_io_expander_handle_t expander, uint32_t
     return err;
 }
 
+static void load_screen_settings(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(TABFORGE_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "screen settings load failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    uint8_t saved_index = g_screen_timeout_index;
+    err = nvs_get_u8(handle, TABFORGE_NVS_SCREEN_TIMEOUT_KEY, &saved_index);
+    if (err == ESP_OK && saved_index < screen_timeout_count()) {
+        g_screen_timeout_index = saved_index;
+    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TABFORGE_TAG, "screen timeout setting invalid: %s", esp_err_to_name(err));
+    }
+
+    nvs_close(handle);
+}
+
+static void save_screen_timeout_setting(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(TABFORGE_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "screen timeout save failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_set_u8(handle, TABFORGE_NVS_SCREEN_TIMEOUT_KEY, g_screen_timeout_index);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "screen timeout save failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void enter_screen_sleep(const char *event_name)
+{
+    if (g_screen_sleeping) {
+        return;
+    }
+
+    esp_err_t err = bsp_display_backlight_off();
+    g_screen_power_error = err;
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "screen sleep failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    g_screen_sleeping = true;
+    g_screen_sleep_count++;
+    g_screen_sleep_start_ms = now_ms_u32();
+    g_sleep_input_seq = g_input_activity_seq;
+    append_event(event_name);
+    ESP_LOGI(TABFORGE_TAG, "screen sleep entered: timeout=%s reason=%s",
+             screen_timeout_label(),
+             event_name);
+}
+
+static void exit_screen_sleep(const char *event_name)
+{
+    if (!g_screen_sleeping) {
+        return;
+    }
+
+    esp_err_t err = bsp_display_backlight_on();
+    g_screen_power_error = err;
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "screen wake failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    g_screen_sleeping = false;
+    lv_display_trigger_activity(g_display);
+    append_event(event_name);
+    ESP_LOGI(TABFORGE_TAG, "screen woke: %s", event_name);
+}
+
 static void ensure_dir(const char *path)
 {
     if (mkdir(path, 0775) != 0 && errno != EEXIST) {
@@ -451,7 +619,7 @@ static void write_default_config_if_missing(void)
             "  \"operatorLabel\": \"Tab5\",\n"
             "  \"defaultMode\": \"meshtastic\",\n"
             "  \"updateChannel\": \"stable\",\n"
-            "  \"ui\": { \"home\": \"tablet\", \"autoRotate\": true, \"liveStats\": true },\n"
+            "  \"ui\": { \"home\": \"tablet\", \"autoRotate\": true, \"liveStats\": true, \"screenTimeoutSeconds\": 120, \"sleepOnTimeout\": true },\n"
             "  \"devices\": {\n"
             "    \"unit-c6l\": { \"enabled\": true, \"preferredTransport\": \"usb-cdc\", \"mode\": \"meshtastic\" },\n"
             "    \"tdeck\": { \"enabled\": true, \"preferredTransport\": \"usb-cdc\", \"mode\": \"zdeck-meshtastic\" },\n"
@@ -810,7 +978,7 @@ static void show_nav_page(nav_page_t page)
 
     switch (page) {
     case NAV_PAGE_SETTINGS:
-        set_activity("Settings", "Touch-ready controls: mesh profile, rotation, add-on power, SD, audio, USB, and OTA status.");
+        set_activity("Settings", "Touch-ready controls: mesh profile, rotation, screen timeout, sleep, add-on power, SD, USB, and OTA status.");
         break;
     case NAV_PAGE_UPDATE:
         set_activity("Update Center", "GitHub Pages manifest selected. OTA staging waits for explicit button confirmation.");
@@ -1011,6 +1179,7 @@ static void refresh_live_stats_locked(void)
                               (unsigned long)g_usb_disconnect_count);
     }
 
+    refresh_screen_widgets_locked();
     refresh_mode_widgets();
     refresh_rotation_widgets();
 }
@@ -1101,6 +1270,32 @@ static void auto_rotate_button_event_cb(lv_event_t *event)
     refresh_rotation_widgets();
     set_activity("Rotation", g_auto_rotate ? "IMU auto-rotate is active" : "Auto-rotate paused on current view");
     append_event(g_auto_rotate ? "auto_rotate_on" : "auto_rotate_off");
+}
+
+static void screen_timeout_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    g_screen_timeout_index = (uint8_t)((g_screen_timeout_index + 1U) % screen_timeout_count());
+    save_screen_timeout_setting();
+    lv_display_trigger_activity(g_display);
+    refresh_screen_widgets_locked();
+    set_activity("Screen Timeout", screen_timeout_seconds() == 0 ? "Screen timeout disabled" : screen_timeout_label());
+    append_event("screen_timeout_changed");
+    ESP_LOGI(TABFORGE_TAG, "screen timeout set to %s", screen_timeout_label());
+}
+
+static void sleep_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    set_activity("Sleep", "Display sleep active. Touch the screen to wake.");
+    refresh_screen_widgets_locked();
+    enter_screen_sleep("screen_sleep_button");
 }
 
 static void update_button_event_cb(lv_event_t *event)
@@ -1198,7 +1393,7 @@ static void build_quick_status(lv_obj_t *parent, lv_coord_t width, lv_coord_t he
     add_stat_card(stat_grid, "USB", &g_ui.usb_label, NULL, card_w, card_h, 0x70a7ff);
     add_stat_card(stat_grid, "Mic", &g_ui.mic_label, &g_ui.mic_bar, card_w, card_h, 0xb982ff);
     add_stat_card(stat_grid, "Add-ons", &g_ui.addon_label, NULL, card_w, card_h, 0xffc857);
-    add_stat_card(stat_grid, "Pulse", &g_ui.heart_label, NULL, card_w, card_h, 0x77dd88);
+    add_stat_card(stat_grid, "Screen", &g_ui.screen_label, NULL, card_w, card_h, 0x77dd88);
 }
 
 static void build_app_grid(lv_obj_t *parent, lv_coord_t width, lv_coord_t height, bool landscape)
@@ -1236,13 +1431,13 @@ static lv_obj_t *make_page(lv_obj_t *parent, lv_coord_t width, lv_coord_t height
     return page;
 }
 
-static void add_info_tile(lv_obj_t *parent,
-                          const char *title,
-                          const char *value,
-                          const char *hint,
-                          lv_coord_t width,
-                          lv_coord_t height,
-                          uint32_t accent)
+static lv_obj_t *add_info_tile(lv_obj_t *parent,
+                               const char *title,
+                               const char *value,
+                               const char *hint,
+                               lv_coord_t width,
+                               lv_coord_t height,
+                               uint32_t accent)
 {
     lv_obj_t *card = make_panel(parent, width, height, 0x11181d, accent);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
@@ -1250,10 +1445,11 @@ static void add_info_tile(lv_obj_t *parent,
     lv_obj_set_style_pad_row(card, 4, 0);
 
     make_text(card, title, 0x8fb0bb, width - 24);
-    make_text(card, value, 0xf1f7f3, width - 24);
+    lv_obj_t *value_label = make_text(card, value, 0xf1f7f3, width - 24);
     if (hint != NULL && hint[0] != '\0') {
         make_text(card, hint, 0x93a6ad, width - 24);
     }
+    return value_label;
 }
 
 static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t height, bool landscape)
@@ -1262,7 +1458,7 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
     lv_obj_set_flex_align(page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(page, 10, 0);
 
-    lv_coord_t controls_h = landscape ? 56 : 108;
+    lv_coord_t controls_h = landscape ? 56 : 162;
     lv_obj_t *controls = lv_obj_create(page);
     lv_obj_remove_style_all(controls);
     lv_obj_set_size(controls, width, controls_h);
@@ -1272,10 +1468,12 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
     lv_obj_set_style_pad_row(controls, 10, 0);
     lv_obj_set_style_pad_column(controls, 10, 0);
 
-    lv_coord_t control_cols = landscape ? 3 : 2;
+    lv_coord_t control_cols = landscape ? 5 : 2;
     lv_coord_t control_w = (width - ((control_cols - 1) * 10)) / control_cols;
     make_button(controls, control_w, "Mode Profile", mode_button_event_cb);
     make_button(controls, control_w, "Auto Rotate", auto_rotate_button_event_cb);
+    make_button(controls, control_w, "Timeout", screen_timeout_button_event_cb);
+    make_button(controls, control_w, "Sleep", sleep_button_event_cb);
     make_button(controls, control_w, "Update Center", update_button_event_cb);
 
     lv_obj_t *grid = lv_obj_create(page);
@@ -1295,8 +1493,8 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
     char power_value[64];
     char usb_value[48];
     char grove_value[48];
-    char mic_value[48];
     char battery_value[48];
+    char screen_value[48];
 
     snprintf(sd_value, sizeof(sd_value), "%s",
              g_sd_ready ? (g_sd_recovered ? "recovered" : "mounted") : esp_err_to_name(g_sd_last_error));
@@ -1314,14 +1512,14 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
     snprintf(grove_value, sizeof(grove_value), "UART %s | IR %s",
              g_grove_uart_ready ? "ready" : "wait",
              g_ir_probe_ready ? "ready" : "wait");
-    snprintf(mic_value, sizeof(mic_value), "%s", mic_state_text());
+    format_screen_status(screen_value, sizeof(screen_value));
 
     add_info_tile(grid, "SD", sd_value, "Creates /tabforge config, logs, audio, backups, and IR folders.", card_w, card_h, 0x61d5f0);
+    g_ui.settings_screen_label = add_info_tile(grid, "Display", screen_value, "Timeout button cycles values; Sleep turns display off.", card_w, card_h, 0x77dd88);
     add_info_tile(grid, "Rotation", rotation_value, "Gyro auto-rotate can be locked from the dock.", card_w, card_h, 0x77dd88);
     add_info_tile(grid, "Power", power_value, battery_value, card_w, card_h, 0xffc857);
     add_info_tile(grid, "USB Host", usb_value, "CDC serial scanner for C6L and T-Deck links.", card_w, card_h, 0x70a7ff);
     add_info_tile(grid, "Grove / IR", grove_value, "GPIO54 RX and GPIO53 TX are armed.", card_w, card_h, 0xff7a66);
-    add_info_tile(grid, "Audio", mic_value, "ES7210 mic level monitor runs in the background.", card_w, card_h, 0xb982ff);
 }
 
 static void build_update_page(lv_obj_t *page, lv_coord_t width, lv_coord_t height, bool landscape)
@@ -1528,6 +1726,46 @@ static void sensor_event_handler(void *handler_args, esp_event_base_t base, int3
         break;
     default:
         break;
+    }
+}
+
+static void input_activity_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING ||
+        code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED) {
+        g_input_activity_seq++;
+    }
+}
+
+static void check_screen_power_locked(void)
+{
+    if (g_display == NULL) {
+        return;
+    }
+
+    uint32_t now_ms = now_ms_u32();
+    if (g_screen_sleeping) {
+        if (g_input_activity_seq != g_sleep_input_seq) {
+            if ((uint32_t)(now_ms - g_screen_sleep_start_ms) < TABFORGE_SCREEN_WAKE_GRACE_MS) {
+                g_sleep_input_seq = g_input_activity_seq;
+            } else {
+                exit_screen_sleep("screen_touch_wake");
+                refresh_screen_widgets_locked();
+            }
+        }
+        return;
+    }
+
+    uint32_t timeout_seconds = screen_timeout_seconds();
+    if (timeout_seconds == 0) {
+        return;
+    }
+
+    uint32_t inactive_ms = lv_display_get_inactive_time(g_display);
+    if (inactive_ms >= (timeout_seconds * 1000U)) {
+        enter_screen_sleep("screen_timeout_sleep");
+        refresh_screen_widgets_locked();
     }
 }
 
@@ -1960,6 +2198,7 @@ static void stats_task(void *arg)
     while (true) {
         if (bsp_display_lock(1000)) {
             maybe_apply_auto_rotation_locked();
+            check_screen_power_locked();
             refresh_live_stats_locked();
             bsp_display_unlock();
         }
@@ -1974,12 +2213,15 @@ static void heartbeat_task(void *arg)
     while (true) {
         char battery_status[32];
         format_battery_status(battery_status, sizeof(battery_status), false);
-        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s pa5v=%s usb5v=%s charge=%s bat=%s usb=%s usb_rx=%lu grove_rx=%lu/%lu ir_edges=%lu rotation=%s",
+        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s screen=%s timeout=%s sleeps=%lu pa5v=%s usb5v=%s charge=%s bat=%s usb=%s usb_rx=%lu grove_rx=%lu/%lu ir_edges=%lu rotation=%s",
                  (unsigned long)g_heartbeat_count++,
                  active_mode_name(),
                  g_sd_ready ? (g_sd_recovered ? "recovered" : "ready") : "missing",
                  g_imu_ready ? "ready" : "pending",
                  mic_state_text(),
+                 g_screen_sleeping ? "sleep" : "awake",
+                 screen_timeout_label(),
+                 (unsigned long)g_screen_sleep_count,
                  g_ext_power_ready ? "on" : "err",
                  g_usb_power_ready ? "on" : "err",
                  g_charge_enable_ready ? "on" : "err",
@@ -1998,6 +2240,7 @@ static void heartbeat_task(void *arg)
 void app_main(void)
 {
     init_nvs();
+    load_screen_settings();
     init_network_stack();
     log_boot_status();
     init_sdcard();
@@ -2009,6 +2252,10 @@ void app_main(void)
 
     if (bsp_display_lock(0)) {
         bsp_display_rotate(g_display, g_rotation);
+        lv_indev_t *touch = bsp_display_get_input_dev();
+        if (touch != NULL) {
+            lv_indev_add_event_cb(touch, input_activity_event_cb, LV_EVENT_ALL, NULL);
+        }
         lv_obj_t *screen = lv_display_get_screen_active(g_display);
         lv_obj_clean(screen);
         build_dashboard(screen);
