@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
@@ -50,7 +51,10 @@ static const feature_tile_t g_tiles[] = {
 
 static lv_obj_t *g_status_label;
 static lv_obj_t *g_sd_label;
+static lv_obj_t *g_mic_label;
+static lv_obj_t *g_mode_button_label;
 static bool g_sd_ready;
+static bool g_meshcore_mode;
 
 static const char *state_text(feature_state_t state)
 {
@@ -60,6 +64,11 @@ static const char *state_text(feature_state_t state)
 static lv_color_t color_hex(uint32_t value)
 {
     return lv_color_hex(value);
+}
+
+static const char *active_mode_name(void)
+{
+    return g_meshcore_mode ? "MESHCORE" : "MESHTASTIC";
 }
 
 static void ensure_dir(const char *path)
@@ -141,6 +150,40 @@ static void init_sdcard(void)
     }
 }
 
+static void refresh_mode_widgets(void)
+{
+    if (g_status_label != NULL) {
+        lv_label_set_text_fmt(g_status_label, "Version %s | Mode %s | USB CDC READY", TABFORGE_VERSION, active_mode_name());
+    }
+
+    if (g_mode_button_label != NULL) {
+        lv_label_set_text(g_mode_button_label, g_meshcore_mode ? "Switch to Meshtastic" : "Switch to MeshCore");
+    }
+}
+
+static void mode_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    g_meshcore_mode = !g_meshcore_mode;
+    refresh_mode_widgets();
+    append_event(g_meshcore_mode ? "mode_meshcore" : "mode_meshtastic");
+    ESP_LOGI(TABFORGE_TAG, "mode switched to %s", active_mode_name());
+}
+
+static void set_mic_status(const char *text, uint32_t color)
+{
+    if (g_mic_label == NULL || !bsp_display_lock(1000)) {
+        return;
+    }
+
+    lv_label_set_text(g_mic_label, text);
+    lv_obj_set_style_text_color(g_mic_label, color_hex(color), 0);
+    bsp_display_unlock();
+}
+
 static lv_obj_t *make_panel(lv_obj_t *parent, lv_coord_t width, lv_coord_t height)
 {
     lv_obj_t *panel = lv_obj_create(parent);
@@ -211,9 +254,13 @@ static void build_dashboard(lv_obj_t *screen)
     lv_obj_set_style_text_color(g_status_label, color_hex(0x5ce08a), 0);
     lv_obj_set_style_text_font(g_status_label, &lv_font_montserrat_14, 0);
     g_sd_label = lv_label_create(status_box);
-    lv_label_set_text(g_sd_label, g_sd_ready ? "SD mounted: /tabforge config/log folders ready" : "SD not mounted: insert card and reboot");
+    lv_label_set_text(g_sd_label, g_sd_ready ? "SD mounted: /tabforge config/log folders ready" : "SD mount failed: use FAT32 card, then reboot");
     lv_obj_set_style_text_color(g_sd_label, g_sd_ready ? color_hex(0x6ed6e8) : color_hex(0xff786d), 0);
     lv_obj_set_style_text_font(g_sd_label, &lv_font_montserrat_14, 0);
+    g_mic_label = lv_label_create(status_box);
+    lv_label_set_text(g_mic_label, "Mic probe: pending");
+    lv_obj_set_style_text_color(g_mic_label, color_hex(0xe9ca60), 0);
+    lv_obj_set_style_text_font(g_mic_label, &lv_font_montserrat_14, 0);
 
     lv_obj_t *grid = lv_obj_create(screen);
     lv_obj_remove_style_all(grid);
@@ -231,7 +278,16 @@ static void build_dashboard(lv_obj_t *screen)
     lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     add_label(footer, "Next: attach C6L over USB host, then wire Meshtastic serial and MeshCore mode profiles.", 0x9ab0aa, 0);
-    add_label(footer, "Update manifest: its-ze.github.io/tabforge-cyberdeck", 0x6ed6e8, 0);
+    lv_obj_t *button = lv_button_create(footer);
+    lv_obj_set_size(button, 220, 42);
+    lv_obj_set_style_bg_color(button, color_hex(0x28534f), 0);
+    lv_obj_set_style_radius(button, 6, 0);
+    lv_obj_add_event_cb(button, mode_button_event_cb, LV_EVENT_CLICKED, NULL);
+    g_mode_button_label = lv_label_create(button);
+    lv_obj_center(g_mode_button_label);
+    lv_obj_set_style_text_color(g_mode_button_label, color_hex(0xedf6f0), 0);
+    lv_obj_set_style_text_font(g_mode_button_label, &lv_font_montserrat_14, 0);
+    refresh_mode_widgets();
 }
 
 static void init_nvs(void)
@@ -261,12 +317,77 @@ static void log_boot_status(void)
     ESP_LOGI(TABFORGE_TAG, "Event log: %s", TABFORGE_EVENT_LOG_PATH);
 }
 
+static void mic_probe_task(void *arg)
+{
+    (void)arg;
+
+    esp_codec_dev_handle_t mic = bsp_audio_codec_microphone_init();
+    if (mic == NULL) {
+        ESP_LOGW(TABFORGE_TAG, "mic probe failed: microphone codec init returned NULL");
+        set_mic_status("Mic probe: codec init failed", 0xff786d);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    esp_codec_dev_sample_info_t sample_info = {
+        .sample_rate = 16000,
+        .channel = 1,
+        .bits_per_sample = 16,
+    };
+
+    int codec_err = esp_codec_dev_set_in_gain(mic, 36.0f);
+    if (codec_err != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TABFORGE_TAG, "mic gain set failed: %d", codec_err);
+    }
+
+    codec_err = esp_codec_dev_open(mic, &sample_info);
+    if (codec_err != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TABFORGE_TAG, "mic open failed: %d", codec_err);
+        set_mic_status("Mic probe: open failed", 0xff786d);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int16_t samples[512] = {0};
+    codec_err = esp_codec_dev_read(mic, samples, sizeof(samples));
+    esp_codec_dev_close(mic);
+
+    if (codec_err != ESP_CODEC_DEV_OK) {
+        ESP_LOGW(TABFORGE_TAG, "mic read failed: %d", codec_err);
+        set_mic_status("Mic probe: read failed", 0xff786d);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int64_t sum = 0;
+    int peak = 0;
+    for (size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i) {
+        int sample = samples[i];
+        if (sample < 0) {
+            sample = -sample;
+        }
+        sum += sample;
+        if (sample > peak) {
+            peak = sample;
+        }
+    }
+
+    int average = (int)(sum / (sizeof(samples) / sizeof(samples[0])));
+    char label[80];
+    snprintf(label, sizeof(label), "Mic probe: level %d peak %d", average, peak);
+    set_mic_status(label, 0x6ed6e8);
+    append_event("mic_probe");
+    ESP_LOGI(TABFORGE_TAG, "mic probe level=%d peak=%d samples=%u", average, peak, (unsigned)(sizeof(samples) / sizeof(samples[0])));
+    vTaskDelete(NULL);
+}
+
 static void heartbeat_task(void *arg)
 {
     uint32_t beat = 0;
     while (true) {
-        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=meshtastic sd=%s",
+        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s",
                  (unsigned long)beat++,
+                 active_mode_name(),
                  g_sd_ready ? "ready" : "missing");
         append_event("heartbeat");
         vTaskDelay(pdMS_TO_TICKS(30000));
@@ -289,4 +410,5 @@ void app_main(void)
     bsp_display_unlock();
 
     xTaskCreate(heartbeat_task, "tabforge-heartbeat", 4096, NULL, 5, NULL);
+    xTaskCreate(mic_probe_task, "tabforge-mic-probe", 6144, NULL, 4, NULL);
 }
