@@ -22,6 +22,7 @@ dependencies.lock
 !tools/save-github-token.ps1
 *password*
 backups/
+artifacts/
 Private-Keys/
 node_modules/
 .DS_Store

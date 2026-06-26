@@ -28,5 +28,9 @@ jobs:
           name: tabforge-tab5-firmware
           path: |
             firmware/tabforge-tab5/build/*.bin
+            firmware/tabforge-tab5/build/*.json
+            firmware/tabforge-tab5/build/flash_args
+            firmware/tabforge-tab5/build/bootloader/*.bin
+            firmware/tabforge-tab5/build/partition_table/*.bin
             firmware/tabforge-tab5/build/*.elf
             firmware/tabforge-tab5/build/*.map
