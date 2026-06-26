@@ -47,6 +47,22 @@ foreach ($path in $requiredPaths) {
   }
 }
 
+if (Test-Path -LiteralPath (Resolve-ProjectPath ".git")) {
+  foreach ($path in $requiredPaths) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      & git -C $Root ls-files --error-unmatch $path 2>$null | Out-Null
+      $gitExit = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($gitExit -ne 0) {
+      Add-CheckError "Required path exists locally but is not tracked by git: $path"
+    }
+  }
+}
+
 $jsonFiles = Get-ChildItem -LiteralPath $Root -Recurse -File -Filter "*.json" |
   Where-Object { $_.FullName -notmatch "\\(node_modules|\.git|build|dist)\\" }
 

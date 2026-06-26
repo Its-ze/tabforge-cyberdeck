@@ -14,10 +14,12 @@ dependencies.lock
 *.log
 *.jsonl
 *.csv
+!firmware/**/partitions.csv
 *.pem
 *.key
 *secret*
 *token*
+!tools/save-github-token.ps1
 *password*
 backups/
 Private-Keys/
