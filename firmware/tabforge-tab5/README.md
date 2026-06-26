@@ -9,7 +9,7 @@ idf.py set-target esp32p4
 idf.py build
 ```
 
-The first version is a service scaffold with OTA partitions and feature registration. The next implementation layer should wire the official Tab5 BSP, LVGL display/touch, audio codec, USB host, SD mount, and Grove/IR pins.
+The first installed version uses the official M5Stack Tab5 ESP-BSP, starts LVGL, shows a TabForge dashboard, mounts the SD card, and creates runtime folders/config under `/sdcard/tabforge`.
 
 ## Runtime Paths
 
@@ -21,4 +21,3 @@ The first version is a service scaffold with OTA partitions and feature registra
 ## Update Policy
 
 TabForge OTA uses the `ota_0` and `ota_1` partitions in `partitions.csv`. The application must verify SHA256 from the GitHub Pages manifest before calling ESP-IDF OTA write APIs.
-

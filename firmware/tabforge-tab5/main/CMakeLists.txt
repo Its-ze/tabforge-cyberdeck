@@ -1,12 +1,14 @@
 idf_component_register(
     SRCS
-        "app_main.cpp"
+        "app_main.c"
     INCLUDE_DIRS
         "."
     REQUIRES
         app_update
         esp_event
         esp_netif
+        fatfs
+        m5stack_tab5
         nvs_flash
 )
 

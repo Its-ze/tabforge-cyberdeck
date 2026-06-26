@@ -4,3 +4,4 @@ targets:
   - esp32p4
 dependencies:
   idf: ">=5.4"
+  espressif/m5stack_tab5: "*"

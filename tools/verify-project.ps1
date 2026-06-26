@@ -31,7 +31,7 @@ $requiredPaths = @(
   "docs\manifest.json",
   "docs\manifest-lab.json",
   "firmware\tabforge-tab5\CMakeLists.txt",
-  "firmware\tabforge-tab5\main\app_main.cpp",
+  "firmware\tabforge-tab5\main\app_main.c",
   "firmware\tabforge-tab5\partitions.csv",
   "protocol\tabforge-link-v0.md",
   "protocol\tabforge-link.schema.json",
