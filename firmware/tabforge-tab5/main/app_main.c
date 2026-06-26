@@ -639,7 +639,7 @@ static void refresh_live_stats_locked(void)
             uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
             uint64_t age_ms = g_usb_last_rx_ms > 0 ? now_ms - g_usb_last_rx_ms : 0;
             lv_label_set_text_fmt(g_ui.usb_label,
-                                  "open | %luB | %llums",
+                                  "open %lu | %luB | %llums",
                                   (unsigned long)g_usb_open_count,
                                   (unsigned long)g_usb_rx_bytes,
                                   (unsigned long long)age_ms);
