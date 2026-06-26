@@ -9,6 +9,7 @@
 #include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
+#include "esp_io_expander.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
@@ -19,6 +20,7 @@
 #include "lvgl.h"
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
+#include "usb/cdc_acm_host.h"
 
 #ifndef TABFORGE_VERSION
 #define TABFORGE_VERSION "0.1.0"
@@ -34,6 +36,11 @@
 #define STATS_REFRESH_MS 1000
 #define MIC_SAMPLE_RATE 16000
 #define MIC_SAMPLES 512
+#define USB_CDC_BAUDRATE 115200
+#define USB_CDC_SCAN_TIMEOUT_MS 2500
+#define TABFORGE_EXT5V_EN IO_EXPANDER_PIN_NUM_2
+#define TABFORGE_IR_RX_GPIO GPIO_NUM_53
+#define TABFORGE_IR_TX_GPIO GPIO_NUM_54
 
 typedef enum {
     FEATURE_ACTIVE,
@@ -58,9 +65,19 @@ typedef enum {
     MIC_STATE_READ_FAILED,
 } mic_state_t;
 
+typedef enum {
+    USB_STATE_OFF,
+    USB_STATE_POWERED,
+    USB_STATE_SCANNING,
+    USB_STATE_OPEN,
+    USB_STATE_DISCONNECTED,
+    USB_STATE_ERROR,
+} usb_state_t;
+
 typedef struct {
     lv_obj_t *status_label;
     lv_obj_t *sd_label;
+    lv_obj_t *addon_label;
     lv_obj_t *mode_label;
     lv_obj_t *mode_detail_label;
     lv_obj_t *uptime_label;
@@ -69,6 +86,8 @@ typedef struct {
     lv_obj_t *mic_label;
     lv_obj_t *tilt_label;
     lv_obj_t *heart_label;
+    lv_obj_t *usb_label;
+    lv_obj_t *ir_label;
     lv_obj_t *gyro_label;
     lv_obj_t *rotation_label;
     lv_obj_t *activity_title_label;
@@ -100,6 +119,21 @@ static bool g_auto_rotate = true;
 static bool g_sd_ready;
 static bool g_meshcore_mode;
 static uint32_t g_heartbeat_count;
+static bool g_ext_power_ready;
+static esp_err_t g_ext_power_error = ESP_OK;
+static bool g_ir_probe_ready;
+static int g_ir_level = -1;
+static uint32_t g_ir_edges;
+static bool g_usb_host_ready;
+static usb_state_t g_usb_state = USB_STATE_OFF;
+static esp_err_t g_usb_last_error = ESP_OK;
+static uint32_t g_usb_open_count;
+static uint32_t g_usb_disconnect_count;
+static uint32_t g_usb_rx_packets;
+static uint32_t g_usb_rx_bytes;
+static uint64_t g_usb_last_rx_ms;
+static cdc_acm_dev_hdl_t g_usb_cdc_handle;
+static bool g_usb_cdc_disconnected;
 
 #if BSP_CAPS_IMU
 static sensor_handle_t g_imu_sensor_handle;
@@ -172,6 +206,25 @@ static const char *mic_state_text(void)
     case MIC_STATE_PENDING:
     default:
         return "pending";
+    }
+}
+
+static const char *usb_state_text(void)
+{
+    switch (g_usb_state) {
+    case USB_STATE_POWERED:
+        return "powered";
+    case USB_STATE_SCANNING:
+        return "scanning";
+    case USB_STATE_OPEN:
+        return "cdc open";
+    case USB_STATE_DISCONNECTED:
+        return "disconnected";
+    case USB_STATE_ERROR:
+        return "error";
+    case USB_STATE_OFF:
+    default:
+        return "off";
     }
 }
 
@@ -456,6 +509,19 @@ static void refresh_live_stats_locked(void)
         lv_obj_set_style_text_color(g_ui.sd_label, g_sd_ready ? color_hex(0x6ee7a2) : color_hex(0xff7a66), 0);
     }
 
+    if (g_ui.addon_label != NULL) {
+        const char *ext = g_ext_power_ready ? "EXT5V on" : "EXT5V error";
+        const char *ir = g_ir_probe_ready ? "IR probe" : "IR pending";
+        lv_label_set_text_fmt(g_ui.addon_label,
+                              "%s | USB %s | %s",
+                              ext,
+                              usb_state_text(),
+                              ir);
+        lv_obj_set_style_text_color(g_ui.addon_label,
+                                    (g_ext_power_ready && g_usb_host_ready) ? color_hex(0x6ee7a2) : color_hex(0xffc857),
+                                    0);
+    }
+
     if (g_ui.mic_label != NULL) {
         if (g_mic_state == MIC_STATE_ONLINE) {
             lv_label_set_text_fmt(g_ui.mic_label, "avg %d | peak %d", g_mic_average, g_mic_peak);
@@ -483,6 +549,35 @@ static void refresh_live_stats_locked(void)
         }
     }
 
+    if (g_ui.usb_label != NULL) {
+        if (g_usb_state == USB_STATE_OPEN) {
+            uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+            uint64_t age_ms = g_usb_last_rx_ms > 0 ? now_ms - g_usb_last_rx_ms : 0;
+            lv_label_set_text_fmt(g_ui.usb_label,
+                                  "open %lu | rx %luB | %llums",
+                                  (unsigned long)g_usb_open_count,
+                                  (unsigned long)g_usb_rx_bytes,
+                                  (unsigned long long)age_ms);
+        } else if (g_usb_last_error != ESP_OK) {
+            lv_label_set_text_fmt(g_ui.usb_label, "%s | %s", usb_state_text(), esp_err_to_name(g_usb_last_error));
+        } else {
+            lv_label_set_text_fmt(g_ui.usb_label, "%s", usb_state_text());
+        }
+    }
+
+    if (g_ui.ir_label != NULL) {
+        if (g_ir_probe_ready) {
+            lv_label_set_text_fmt(g_ui.ir_label,
+                                  "rx %d | edges %lu",
+                                  g_ir_level,
+                                  (unsigned long)g_ir_edges);
+        } else if (g_ext_power_error != ESP_OK) {
+            lv_label_set_text_fmt(g_ui.ir_label, "power %s", esp_err_to_name(g_ext_power_error));
+        } else {
+            lv_label_set_text(g_ui.ir_label, "probe pending");
+        }
+    }
+
     if (g_ui.gyro_label != NULL) {
         if (g_imu_ready) {
             uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
@@ -499,9 +594,9 @@ static void refresh_live_stats_locked(void)
     }
 
     if (g_ui.heart_label != NULL) {
-        lv_label_set_text_fmt(g_ui.heart_label, "beat %lu | mic %lu",
+        lv_label_set_text_fmt(g_ui.heart_label, "beat %lu | usb drop %lu",
                               (unsigned long)g_heartbeat_count,
-                              (unsigned long)g_mic_reads);
+                              (unsigned long)g_usb_disconnect_count);
     }
 
     refresh_mode_widgets();
@@ -604,6 +699,7 @@ static void build_top_bar(lv_obj_t *screen, lv_coord_t width, lv_coord_t height,
     lv_obj_set_style_pad_row(status_box, 5, 0);
     g_ui.status_label = make_text(status_box, "", 0x6ee7a2, status_w);
     g_ui.sd_label = make_text(status_box, "", 0x93a6ad, status_w);
+    g_ui.addon_label = make_text(status_box, "", 0x93a6ad, status_w);
     g_ui.rotation_label = make_text(status_box, "", 0x61d5f0, status_w);
 }
 
@@ -620,7 +716,7 @@ static void build_live_surface(lv_obj_t *parent, lv_coord_t width, lv_coord_t he
     lv_obj_t *stat_grid = lv_obj_create(live);
     lv_obj_remove_style_all(stat_grid);
     lv_obj_set_width(stat_grid, width - 24);
-    lv_obj_set_height(stat_grid, landscape ? 220 : 206);
+    lv_obj_set_height(stat_grid, landscape ? 248 : 206);
     lv_obj_set_flex_flow(stat_grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_style_pad_row(stat_grid, 10, 0);
     lv_obj_set_style_pad_column(stat_grid, 10, 0);
@@ -629,13 +725,15 @@ static void build_live_surface(lv_obj_t *parent, lv_coord_t width, lv_coord_t he
     if (card_w < 140) {
         card_w = (width - 46) / 2;
     }
-    lv_coord_t card_h = landscape ? 96 : 92;
+    lv_coord_t card_h = landscape ? 56 : 92;
 
     add_stat_card(stat_grid, "Uptime", &g_ui.uptime_label, NULL, card_w, card_h, 0x43d17a);
     add_stat_card(stat_grid, "Heap", &g_ui.heap_label, &g_ui.heap_bar, card_w, card_h, 0x61d5f0);
     add_stat_card(stat_grid, "PSRAM", &g_ui.psram_label, &g_ui.psram_bar, card_w, card_h, 0xb982ff);
     add_stat_card(stat_grid, "Mic", &g_ui.mic_label, &g_ui.mic_bar, card_w, card_h, 0xff7a66);
     add_stat_card(stat_grid, "Tilt", &g_ui.tilt_label, NULL, card_w, card_h, 0xf0bf4f);
+    add_stat_card(stat_grid, "USB CDC", &g_ui.usb_label, NULL, card_w, card_h, 0x70a7ff);
+    add_stat_card(stat_grid, "IR Grove", &g_ui.ir_label, NULL, card_w, card_h, 0xffc857);
     add_stat_card(stat_grid, "Pulse", &g_ui.heart_label, NULL, card_w, card_h, 0x77dd88);
 
     lv_obj_t *activity = make_panel(live, width - 24, landscape ? 126 : 112, 0x141b21, 0x344955);
@@ -706,7 +804,7 @@ static void build_dashboard(lv_obj_t *screen)
     lv_coord_t screen_h = (lv_coord_t)deck_height();
     lv_coord_t pad = landscape ? 16 : 12;
     lv_coord_t gap = landscape ? 12 : 10;
-    lv_coord_t top_h = landscape ? 82 : 92;
+    lv_coord_t top_h = landscape ? 98 : 112;
     lv_coord_t dock_h = landscape ? 70 : 68;
     lv_coord_t content_w = screen_w - (pad * 2);
     lv_coord_t body_h = screen_h - (pad * 2) - top_h - dock_h - (gap * 2);
@@ -892,6 +990,109 @@ static void log_boot_status(void)
     ESP_LOGI(TABFORGE_TAG, "Event log: %s", TABFORGE_EVENT_LOG_PATH);
 }
 
+static void init_expansion_power(void)
+{
+    esp_io_expander_handle_t io_expander = bsp_io_expander_init();
+    if (io_expander == NULL) {
+        g_ext_power_ready = false;
+        g_ext_power_error = ESP_FAIL;
+        ESP_LOGW(TABFORGE_TAG, "expansion 5V enable failed: IO expander unavailable");
+        return;
+    }
+
+    esp_err_t err = ESP_OK;
+    err |= esp_io_expander_set_dir(io_expander, TABFORGE_EXT5V_EN, IO_EXPANDER_OUTPUT);
+    err |= esp_io_expander_set_level(io_expander, TABFORGE_EXT5V_EN, true);
+    err |= esp_io_expander_set_output_mode(io_expander, TABFORGE_EXT5V_EN, IO_EXPANDER_OUTPUT_MODE_PUSH_PULL);
+    g_ext_power_error = err;
+    g_ext_power_ready = (err == ESP_OK);
+
+    if (g_ext_power_ready) {
+        ESP_LOGI(TABFORGE_TAG, "expansion 5V enabled for M5-Bus/Grove/GPIO_EXT");
+        append_event("expansion_5v_enabled");
+    } else {
+        ESP_LOGW(TABFORGE_TAG, "expansion 5V enable failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void init_ir_probe(void)
+{
+    gpio_config_t rx_config = {
+        .pin_bit_mask = (1ULL << (uint32_t)TABFORGE_IR_RX_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t err = gpio_config(&rx_config);
+    if (err != ESP_OK) {
+        g_ir_probe_ready = false;
+        ESP_LOGW(TABFORGE_TAG, "IR RX probe config failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    gpio_config_t tx_config = {
+        .pin_bit_mask = (1ULL << (uint32_t)TABFORGE_IR_TX_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    err = gpio_config(&tx_config);
+    if (err != ESP_OK) {
+        g_ir_probe_ready = false;
+        ESP_LOGW(TABFORGE_TAG, "IR TX idle config failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    gpio_set_level(TABFORGE_IR_TX_GPIO, 0);
+    g_ir_level = gpio_get_level(TABFORGE_IR_RX_GPIO);
+    g_ir_probe_ready = true;
+    append_event("ir_probe_started");
+    ESP_LOGI(TABFORGE_TAG, "IR Grove probe ready on RX GPIO%u TX GPIO%u",
+             (unsigned)TABFORGE_IR_RX_GPIO,
+             (unsigned)TABFORGE_IR_TX_GPIO);
+}
+
+static bool usb_cdc_rx_cb(const uint8_t *data, size_t data_len, void *user_arg)
+{
+    (void)data;
+    (void)user_arg;
+
+    g_usb_rx_packets++;
+    g_usb_rx_bytes += (uint32_t)data_len;
+    g_usb_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    return true;
+}
+
+static void usb_cdc_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_ctx)
+{
+    (void)user_ctx;
+    if (event == NULL) {
+        return;
+    }
+
+    switch (event->type) {
+    case CDC_ACM_HOST_ERROR:
+        g_usb_last_error = event->data.error;
+        g_usb_state = USB_STATE_ERROR;
+        ESP_LOGW(TABFORGE_TAG, "USB CDC error: %s", esp_err_to_name(g_usb_last_error));
+        break;
+    case CDC_ACM_HOST_DEVICE_DISCONNECTED:
+        g_usb_cdc_disconnected = true;
+        g_usb_disconnect_count++;
+        g_usb_state = USB_STATE_DISCONNECTED;
+        ESP_LOGI(TABFORGE_TAG, "USB CDC device disconnected");
+        break;
+    case CDC_ACM_HOST_SERIAL_STATE:
+        ESP_LOGI(TABFORGE_TAG, "USB CDC serial state: 0x%04x", event->data.serial_state.val);
+        break;
+    case CDC_ACM_HOST_NETWORK_CONNECTION:
+    default:
+        break;
+    }
+}
+
 static void mic_monitor_task(void *arg)
 {
     (void)arg;
@@ -957,6 +1158,99 @@ static void mic_monitor_task(void *arg)
     }
 }
 
+static void ir_probe_task(void *arg)
+{
+    (void)arg;
+
+    init_ir_probe();
+    while (true) {
+        if (g_ir_probe_ready) {
+            int level = gpio_get_level(TABFORGE_IR_RX_GPIO);
+            if (g_ir_level >= 0 && level != g_ir_level) {
+                g_ir_edges++;
+            }
+            g_ir_level = level;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+static void usb_cdc_task(void *arg)
+{
+    (void)arg;
+
+    g_usb_state = USB_STATE_POWERED;
+    esp_err_t err = bsp_usb_host_start(BSP_USB_HOST_POWER_MODE_USB_DEV, true);
+    if (err != ESP_OK) {
+        g_usb_last_error = err;
+        g_usb_state = USB_STATE_ERROR;
+        ESP_LOGW(TABFORGE_TAG, "USB host start failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    g_usb_host_ready = true;
+    append_event("usb_host_started");
+    ESP_LOGI(TABFORGE_TAG, "USB host power/library started");
+
+    err = cdc_acm_host_install(NULL);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        g_usb_last_error = err;
+        g_usb_state = USB_STATE_ERROR;
+        ESP_LOGW(TABFORGE_TAG, "USB CDC host install failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    const cdc_acm_line_coding_t line_coding = {
+        .dwDTERate = USB_CDC_BAUDRATE,
+        .bCharFormat = 0,
+        .bParityType = 0,
+        .bDataBits = 8,
+    };
+
+    while (true) {
+        if (g_usb_cdc_handle != NULL) {
+            if (g_usb_cdc_disconnected) {
+                cdc_acm_host_close(g_usb_cdc_handle);
+                g_usb_cdc_handle = NULL;
+                g_usb_cdc_disconnected = false;
+                g_usb_state = USB_STATE_SCANNING;
+            }
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
+        g_usb_state = USB_STATE_SCANNING;
+        cdc_acm_host_device_config_t dev_config = {
+            .connection_timeout_ms = USB_CDC_SCAN_TIMEOUT_MS,
+            .out_buffer_size = 512,
+            .in_buffer_size = 512,
+            .event_cb = usb_cdc_event_cb,
+            .data_cb = usb_cdc_rx_cb,
+            .user_arg = NULL,
+        };
+
+        err = cdc_acm_host_open(CDC_HOST_ANY_VID, CDC_HOST_ANY_PID, 0, &dev_config, &g_usb_cdc_handle);
+        if (err == ESP_OK) {
+            g_usb_state = USB_STATE_OPEN;
+            g_usb_last_error = ESP_OK;
+            g_usb_open_count++;
+            cdc_acm_host_line_coding_set(g_usb_cdc_handle, &line_coding);
+            cdc_acm_host_set_control_line_state(g_usb_cdc_handle, true, true);
+            cdc_acm_host_desc_print(g_usb_cdc_handle);
+            append_event("usb_cdc_open");
+            ESP_LOGI(TABFORGE_TAG, "USB CDC device opened at %u baud", (unsigned)USB_CDC_BAUDRATE);
+        } else {
+            g_usb_last_error = err;
+            if (err != ESP_ERR_NOT_FOUND && err != ESP_ERR_TIMEOUT) {
+                ESP_LOGW(TABFORGE_TAG, "USB CDC open failed: %s", esp_err_to_name(err));
+            }
+            vTaskDelay(pdMS_TO_TICKS(1200));
+        }
+    }
+}
+
 static void stats_task(void *arg)
 {
     (void)arg;
@@ -976,12 +1270,15 @@ static void heartbeat_task(void *arg)
     (void)arg;
 
     while (true) {
-        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s rotation=%s",
+        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s usb=%s rx=%lu ir_edges=%lu rotation=%s",
                  (unsigned long)g_heartbeat_count++,
                  active_mode_name(),
                  g_sd_ready ? "ready" : "missing",
                  g_imu_ready ? "ready" : "pending",
                  mic_state_text(),
+                 usb_state_text(),
+                 (unsigned long)g_usb_rx_bytes,
+                 (unsigned long)g_ir_edges,
                  rotation_name(g_rotation));
         append_event("heartbeat");
         vTaskDelay(pdMS_TO_TICKS(30000));
