@@ -7,7 +7,9 @@ idf_component_register(
         app_update
         esp_event
         esp_netif
+        esp_timer
         fatfs
+        heap
         m5stack_tab5
         nvs_flash
 )

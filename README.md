@@ -22,6 +22,7 @@ This repo is intentionally split into a Tab5 shell and companion-device profiles
 Included now:
 
 - ESP-IDF Tab5 firmware shell with OTA partitions and a feature registry.
+- Phone/tablet-style Tab5 home UI with a status bar, app tiles, dock controls, live heap/PSRAM/SD/mic/IMU stats, and gyro-assisted auto-rotation.
 - Feature catalog for mesh, IR, mic/audio, T-Deck, C6L, USB host, SD, camera, IMU, RS485, and updates.
 - Meshtastic/MeshCore mode-switch contract.
 - GitHub Pages OTA manifests and update-channel metadata.
