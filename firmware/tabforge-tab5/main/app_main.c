@@ -436,6 +436,7 @@ static lv_obj_t *make_panel(lv_obj_t *parent, lv_coord_t width, lv_coord_t heigh
     lv_obj_set_style_bg_color(panel, color_hex(bg), 0);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(panel, 12, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     return panel;
 }
 
@@ -460,6 +461,8 @@ static lv_obj_t *make_button(lv_obj_t *parent, lv_coord_t width, const char *lab
     lv_obj_set_style_bg_color(button, color_hex(0x202b31), 0);
     lv_obj_set_style_border_width(button, 1, 0);
     lv_obj_set_style_border_color(button, color_hex(0x3c525a), 0);
+    lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(button, cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *label = lv_label_create(button);
@@ -470,6 +473,8 @@ static lv_obj_t *make_button(lv_obj_t *parent, lv_coord_t width, const char *lab
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(label);
+    lv_obj_add_flag(label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(label, cb, LV_EVENT_CLICKED, NULL);
     return label;
 }
 
@@ -823,6 +828,8 @@ static void add_app_tile(lv_obj_t *parent, const feature_tile_t *tile, lv_coord_
     lv_obj_set_flex_flow(button, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(button, 7, 0);
+    lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(button, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
 
     lv_obj_t *icon_box = lv_obj_create(button);
@@ -834,18 +841,26 @@ static void add_app_tile(lv_obj_t *parent, const feature_tile_t *tile, lv_coord_
     lv_obj_set_style_bg_opa(icon_box, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(icon_box, 0, 0);
     lv_obj_clear_flag(icon_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(icon_box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(icon_box, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
 
     lv_obj_t *icon = lv_label_create(icon_box);
     lv_label_set_text(icon, tile->code);
     lv_obj_set_style_text_color(icon, color_hex(tile->accent), 0);
     lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
     lv_obj_center(icon);
+    lv_obj_add_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(icon, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
 
     lv_obj_t *name = make_text(button, tile->name, 0xf1f7f3, width - 12);
     lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_add_flag(name, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(name, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
 
     lv_obj_t *metric = make_text(button, tile->metric, tile->state == FEATURE_ACTIVE ? 0x6ee7a2 : 0xffc857, width - 12);
     lv_obj_set_style_text_align(metric, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_add_flag(metric, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(metric, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
 }
 
 static void mode_button_event_cb(lv_event_t *event)
@@ -975,6 +990,7 @@ static void build_app_grid(lv_obj_t *parent, lv_coord_t width, lv_coord_t height
     lv_obj_t *grid = lv_obj_create(parent);
     lv_obj_remove_style_all(grid);
     lv_obj_set_size(grid, width, height);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(grid, 14, 0);
@@ -994,11 +1010,137 @@ static void build_app_grid(lv_obj_t *parent, lv_coord_t width, lv_coord_t height
     }
 }
 
+static lv_obj_t *make_page(lv_obj_t *parent, lv_coord_t width, lv_coord_t height)
+{
+    lv_obj_t *page = lv_obj_create(parent);
+    lv_obj_remove_style_all(page);
+    lv_obj_set_pos(page, 0, 0);
+    lv_obj_set_size(page, width, height);
+    lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+    return page;
+}
+
+static void add_info_tile(lv_obj_t *parent,
+                          const char *title,
+                          const char *value,
+                          const char *hint,
+                          lv_coord_t width,
+                          lv_coord_t height,
+                          uint32_t accent)
+{
+    lv_obj_t *card = make_panel(parent, width, height, 0x11181d, accent);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(card, 4, 0);
+
+    make_text(card, title, 0x8fb0bb, width - 24);
+    make_text(card, value, 0xf1f7f3, width - 24);
+    if (hint != NULL && hint[0] != '\0') {
+        make_text(card, hint, 0x93a6ad, width - 24);
+    }
+}
+
+static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t height, bool landscape)
+{
+    lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(page, 10, 0);
+
+    lv_coord_t controls_h = landscape ? 56 : 108;
+    lv_obj_t *controls = lv_obj_create(page);
+    lv_obj_remove_style_all(controls);
+    lv_obj_set_size(controls, width, controls_h);
+    lv_obj_clear_flag(controls, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(controls, 10, 0);
+    lv_obj_set_style_pad_column(controls, 10, 0);
+
+    lv_coord_t control_cols = landscape ? 3 : 2;
+    lv_coord_t control_w = (width - ((control_cols - 1) * 10)) / control_cols;
+    make_button(controls, control_w, "Mode Profile", mode_button_event_cb);
+    make_button(controls, control_w, "Auto Rotate", auto_rotate_button_event_cb);
+    make_button(controls, control_w, "Update Center", update_button_event_cb);
+
+    lv_obj_t *grid = lv_obj_create(page);
+    lv_obj_remove_style_all(grid);
+    lv_obj_set_size(grid, width, height - controls_h - 10);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(grid, 10, 0);
+    lv_obj_set_style_pad_column(grid, 10, 0);
+
+    lv_coord_t columns = landscape ? 3 : 2;
+    lv_coord_t card_w = (width - ((columns - 1) * 10)) / columns;
+    lv_coord_t card_h = landscape ? 86 : 96;
+    char mode_value[48];
+    char rotation_value[48];
+    char power_value[48];
+    char usb_value[48];
+    char grove_value[48];
+    char mic_value[48];
+
+    snprintf(mode_value, sizeof(mode_value), "%s profile", active_mode_name());
+    snprintf(rotation_value, sizeof(rotation_value), "%s at %d deg",
+             g_auto_rotate ? "Auto" : "Locked",
+             rotation_degrees(g_rotation));
+    snprintf(power_value, sizeof(power_value), "%s",
+             g_ext_power_ready ? "5V enabled" : esp_err_to_name(g_ext_power_error));
+    snprintf(usb_value, sizeof(usb_value), "%s", usb_state_text());
+    snprintf(grove_value, sizeof(grove_value), "UART %s | IR %s",
+             g_grove_uart_ready ? "ready" : "wait",
+             g_ir_probe_ready ? "ready" : "wait");
+    snprintf(mic_value, sizeof(mic_value), "%s", mic_state_text());
+
+    add_info_tile(grid, "Mesh", mode_value, "Meshtastic and MeshCore switch lives here.", card_w, card_h, 0x61d5f0);
+    add_info_tile(grid, "Rotation", rotation_value, "Gyro auto-rotate can be locked from the dock.", card_w, card_h, 0x77dd88);
+    add_info_tile(grid, "Power", power_value, "M5-Bus, Grove, and GPIO_EXT 5V rail.", card_w, card_h, 0xffc857);
+    add_info_tile(grid, "USB Host", usb_value, "CDC serial scanner for C6L and T-Deck links.", card_w, card_h, 0x70a7ff);
+    add_info_tile(grid, "Grove / IR", grove_value, "GPIO54 RX and GPIO53 TX are armed.", card_w, card_h, 0xff7a66);
+    add_info_tile(grid, "Audio", mic_value, "ES7210 mic level monitor runs in the background.", card_w, card_h, 0xb982ff);
+}
+
+static void build_update_page(lv_obj_t *page, lv_coord_t width, lv_coord_t height, bool landscape)
+{
+    (void)landscape;
+
+    lv_obj_t *card = make_panel(page, width, height, 0x10161a, 0xffc857);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(card, 10, 0);
+
+    make_text(card, "Stable OTA", 0xffc857, width - 32);
+    make_text(card, TABFORGE_VERSION, 0xf1f7f3, width - 32);
+    make_text(card, TABFORGE_MANIFEST_URL, 0x93a6ad, width - 32);
+    make_text(card, "The on-device update flow uses this manifest and requires a physical confirmation button before writing OTA flash.", 0xf1f7f3, width - 32);
+
+    lv_coord_t button_w = width > 360 ? 320 : width - 32;
+    make_button(card, button_w, "Select Stable Manifest", update_button_event_cb);
+}
+
+static void build_pages(lv_obj_t *parent, lv_coord_t width, lv_coord_t height, bool landscape)
+{
+    lv_obj_t *pages = lv_obj_create(parent);
+    lv_obj_remove_style_all(pages);
+    lv_obj_set_size(pages, width, height);
+    lv_obj_clear_flag(pages, LV_OBJ_FLAG_SCROLLABLE);
+
+    g_ui.page_apps = make_page(pages, width, height);
+    g_ui.page_settings = make_page(pages, width, height);
+    g_ui.page_update = make_page(pages, width, height);
+
+    build_app_grid(g_ui.page_apps, width, height, landscape);
+    build_settings_page(g_ui.page_settings, width, height, landscape);
+    build_update_page(g_ui.page_update, width, height, landscape);
+}
+
 static void build_body(lv_obj_t *screen, lv_coord_t width, lv_coord_t height, bool landscape)
 {
     lv_obj_t *body = lv_obj_create(screen);
     lv_obj_remove_style_all(body);
     lv_obj_set_size(body, width, height);
+    lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(body, 12, 0);
@@ -1012,22 +1154,27 @@ static void build_body(lv_obj_t *screen, lv_coord_t width, lv_coord_t height, bo
 
     build_home_header(body, width, header_h);
     build_quick_status(body, width, quick_h, landscape);
-    build_app_grid(body, width, apps_h, landscape);
+    build_pages(body, width, apps_h, landscape);
 }
 
 static void build_dock(lv_obj_t *screen, lv_coord_t width, lv_coord_t height)
 {
     lv_obj_t *dock = make_panel(screen, width, height, 0x11171c, 0x26333b);
+    lv_obj_clear_flag(dock, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(dock, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(dock, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(dock, 8, 0);
+    lv_obj_set_style_pad_all(dock, 10, 0);
 
-    lv_coord_t button_w = (width - 72) / 5;
-    make_nav_button(dock, button_w, LV_SYMBOL_LIST, "Apps", apps_button_event_cb);
-    make_nav_button(dock, button_w, LV_SYMBOL_SETTINGS, "Settings", settings_button_event_cb);
-    g_ui.dock_mode_label = make_nav_button(dock, button_w, LV_SYMBOL_SHUFFLE, "Core", mode_button_event_cb);
-    g_ui.dock_auto_label = make_nav_button(dock, button_w, LV_SYMBOL_REFRESH, "Auto", auto_rotate_button_event_cb);
-    make_nav_button(dock, button_w, LV_SYMBOL_DOWNLOAD, "OTA", update_button_event_cb);
+    lv_coord_t button_w = (width - 80) / 5;
+    g_ui.nav_apps = make_nav_button(dock, button_w, LV_SYMBOL_LIST, "Apps", apps_button_event_cb);
+    g_ui.nav_settings = make_nav_button(dock, button_w, LV_SYMBOL_SETTINGS, "Settings", settings_button_event_cb);
+    g_ui.nav_mode = make_nav_button(dock, button_w, LV_SYMBOL_SHUFFLE, "Core", mode_button_event_cb);
+    g_ui.nav_auto = make_nav_button(dock, button_w, LV_SYMBOL_REFRESH, "Auto", auto_rotate_button_event_cb);
+    g_ui.nav_update = make_nav_button(dock, button_w, LV_SYMBOL_DOWNLOAD, "OTA", update_button_event_cb);
+
+    g_ui.dock_mode_label = g_ui.nav_mode.label;
+    g_ui.dock_auto_label = g_ui.nav_auto.label;
+    lv_obj_move_foreground(dock);
 }
 
 static void build_dashboard(lv_obj_t *screen)
@@ -1040,7 +1187,7 @@ static void build_dashboard(lv_obj_t *screen)
     lv_coord_t pad = landscape ? 16 : 12;
     lv_coord_t gap = landscape ? 12 : 10;
     lv_coord_t top_h = landscape ? 46 : 48;
-    lv_coord_t dock_h = landscape ? 78 : 82;
+    lv_coord_t dock_h = landscape ? 96 : 104;
     lv_coord_t content_w = screen_w - (pad * 2);
     lv_coord_t body_h = screen_h - (pad * 2) - top_h - dock_h - (gap * 2);
 
@@ -1055,6 +1202,7 @@ static void build_dashboard(lv_obj_t *screen)
     build_top_bar(screen, content_w, top_h, landscape);
     build_body(screen, content_w, body_h, landscape);
     build_dock(screen, content_w, dock_h);
+    show_nav_page(g_nav_page);
 
     refresh_live_stats_locked();
 }
