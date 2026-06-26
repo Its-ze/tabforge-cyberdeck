@@ -7,6 +7,7 @@
 
 #include "bsp/esp-bsp.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -40,8 +41,14 @@
 #define USB_CDC_BAUDRATE 115200
 #define USB_CDC_SCAN_TIMEOUT_MS 2500
 #define TABFORGE_EXT5V_EN IO_EXPANDER_PIN_NUM_2
-#define TABFORGE_IR_RX_GPIO GPIO_NUM_53
-#define TABFORGE_IR_TX_GPIO GPIO_NUM_54
+#define TABFORGE_GROVE_TX_GPIO GPIO_NUM_53
+#define TABFORGE_GROVE_RX_GPIO GPIO_NUM_54
+#define TABFORGE_IR_TX_GPIO TABFORGE_GROVE_TX_GPIO
+#define TABFORGE_IR_RX_GPIO TABFORGE_GROVE_RX_GPIO
+#define GROVE_UART_NUM UART_NUM_1
+#define GROVE_UART_BAUDRATE 115200
+#define GROVE_UART_RX_BUF_SIZE 2048
+#define GROVE_UART_READ_CHUNK 128
 
 typedef enum {
     FEATURE_ACTIVE,
@@ -125,6 +132,11 @@ static esp_err_t g_ext_power_error = ESP_OK;
 static bool g_ir_probe_ready;
 static int g_ir_level = -1;
 static uint32_t g_ir_edges;
+static bool g_grove_uart_ready;
+static esp_err_t g_grove_uart_error = ESP_OK;
+static uint32_t g_grove_rx_packets;
+static uint32_t g_grove_rx_bytes;
+static uint64_t g_grove_last_rx_ms;
 static bool g_usb_host_ready;
 static usb_state_t g_usb_state = USB_STATE_OFF;
 static esp_err_t g_usb_last_error = ESP_OK;
@@ -512,12 +524,12 @@ static void refresh_live_stats_locked(void)
 
     if (g_ui.addon_label != NULL) {
         const char *ext = g_ext_power_ready ? "EXT5V on" : "EXT5V error";
-        const char *ir = g_ir_probe_ready ? "IR probe" : "IR pending";
+        const char *grove = g_grove_uart_ready ? "Grove RX" : (g_ir_probe_ready ? "IR probe" : "Grove pending");
         lv_label_set_text_fmt(g_ui.addon_label,
                               "%s | USB %s | %s",
                               ext,
                               usb_state_text(),
-                              ir);
+                              grove);
         lv_obj_set_style_text_color(g_ui.addon_label,
                                     (g_ext_power_ready && g_usb_host_ready) ? color_hex(0x6ee7a2) : color_hex(0xffc857),
                                     0);
@@ -568,12 +580,19 @@ static void refresh_live_stats_locked(void)
 
     if (g_ui.ir_label != NULL) {
         if (g_ir_probe_ready) {
+            uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+            uint64_t age_s = g_grove_last_rx_ms > 0 ? (now_ms - g_grove_last_rx_ms) / 1000ULL : 0;
             lv_label_set_text_fmt(g_ui.ir_label,
-                                  "rx %d | edges %lu",
+                                  "IR L%d E%lu | UART %luB/%lu %llus",
                                   g_ir_level,
-                                  (unsigned long)g_ir_edges);
+                                  (unsigned long)g_ir_edges,
+                                  (unsigned long)g_grove_rx_bytes,
+                                  (unsigned long)g_grove_rx_packets,
+                                  (unsigned long long)age_s);
         } else if (g_ext_power_error != ESP_OK) {
             lv_label_set_text_fmt(g_ui.ir_label, "power %s", esp_err_to_name(g_ext_power_error));
+        } else if (g_grove_uart_error != ESP_OK) {
+            lv_label_set_text_fmt(g_ui.ir_label, "uart %s", esp_err_to_name(g_grove_uart_error));
         } else {
             lv_label_set_text(g_ui.ir_label, "probe pending");
         }
@@ -734,7 +753,7 @@ static void build_live_surface(lv_obj_t *parent, lv_coord_t width, lv_coord_t he
     add_stat_card(stat_grid, "Mic", &g_ui.mic_label, &g_ui.mic_bar, card_w, card_h, 0xff7a66);
     add_stat_card(stat_grid, "Tilt", &g_ui.tilt_label, NULL, card_w, card_h, 0xf0bf4f);
     add_stat_card(stat_grid, "USB CDC", &g_ui.usb_label, NULL, card_w, card_h, 0x70a7ff);
-    add_stat_card(stat_grid, "IR Grove", &g_ui.ir_label, NULL, card_w, card_h, 0xffc857);
+    add_stat_card(stat_grid, "Grove IR/UART", &g_ui.ir_label, NULL, card_w, card_h, 0xffc857);
     add_stat_card(stat_grid, "Pulse", &g_ui.heart_label, NULL, card_w, card_h, 0x77dd88);
 
     lv_obj_t *activity = make_panel(live, width - 24, landscape ? 126 : 112, 0x141b21, 0x344955);
@@ -1055,6 +1074,45 @@ static void init_ir_probe(void)
              (unsigned)TABFORGE_IR_TX_GPIO);
 }
 
+static void init_grove_uart_probe(void)
+{
+    const uart_config_t uart_config = {
+        .baud_rate = GROVE_UART_BAUDRATE,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+
+    esp_err_t err = uart_driver_install(GROVE_UART_NUM, GROVE_UART_RX_BUF_SIZE, 0, 0, NULL, 0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        g_grove_uart_error = err;
+        ESP_LOGW(TABFORGE_TAG, "Grove UART RX driver install failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = uart_param_config(GROVE_UART_NUM, &uart_config);
+    if (err == ESP_OK) {
+        err = uart_set_pin(GROVE_UART_NUM,
+                           UART_PIN_NO_CHANGE,
+                           (int)TABFORGE_GROVE_RX_GPIO,
+                           UART_PIN_NO_CHANGE,
+                           UART_PIN_NO_CHANGE);
+    }
+
+    g_grove_uart_error = err;
+    g_grove_uart_ready = (err == ESP_OK);
+    if (g_grove_uart_ready) {
+        append_event("grove_uart_rx_started");
+        ESP_LOGI(TABFORGE_TAG, "Grove UART passive RX ready on GPIO%u at %u baud",
+                 (unsigned)TABFORGE_GROVE_RX_GPIO,
+                 (unsigned)GROVE_UART_BAUDRATE);
+    } else {
+        ESP_LOGW(TABFORGE_TAG, "Grove UART RX config failed: %s", esp_err_to_name(err));
+    }
+}
+
 static bool usb_cdc_rx_cb(const uint8_t *data, size_t data_len, void *user_arg)
 {
     (void)data;
@@ -1164,7 +1222,18 @@ static void ir_probe_task(void *arg)
     (void)arg;
 
     init_ir_probe();
+    init_grove_uart_probe();
+    uint8_t uart_data[GROVE_UART_READ_CHUNK];
     while (true) {
+        if (g_grove_uart_ready) {
+            int rx_len = uart_read_bytes(GROVE_UART_NUM, uart_data, sizeof(uart_data), 0);
+            if (rx_len > 0) {
+                g_grove_rx_packets++;
+                g_grove_rx_bytes += (uint32_t)rx_len;
+                g_grove_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+            }
+        }
+
         if (g_ir_probe_ready) {
             int level = gpio_get_level(TABFORGE_IR_RX_GPIO);
             if (g_ir_level >= 0 && level != g_ir_level) {
@@ -1271,7 +1340,7 @@ static void heartbeat_task(void *arg)
     (void)arg;
 
     while (true) {
-        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s usb=%s rx=%lu ir_edges=%lu rotation=%s",
+        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s usb=%s usb_rx=%lu grove_rx=%lu/%lu ir_edges=%lu rotation=%s",
                  (unsigned long)g_heartbeat_count++,
                  active_mode_name(),
                  g_sd_ready ? "ready" : "missing",
@@ -1279,6 +1348,8 @@ static void heartbeat_task(void *arg)
                  mic_state_text(),
                  usb_state_text(),
                  (unsigned long)g_usb_rx_bytes,
+                 (unsigned long)g_grove_rx_bytes,
+                 (unsigned long)g_grove_rx_packets,
                  (unsigned long)g_ir_edges,
                  rotation_name(g_rotation));
         append_event("heartbeat");
