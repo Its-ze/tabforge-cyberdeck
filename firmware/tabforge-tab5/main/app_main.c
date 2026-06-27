@@ -135,8 +135,9 @@
 #define TABFORGE_OTA_HTTP_CHUNK_SIZE 4096
 #define TABFORGE_PAHUB_I2C_ADDR 0x70
 #define TABFORGE_MESH_MAX_CHANNELS 4
-#define TABFORGE_MESH_MAX_NODES 6
+#define TABFORGE_MESH_MAX_NODES 7
 #define TABFORGE_MESH_MAX_DRAFTS 6
+#define TABFORGE_MESH_CHAT_LINES 8
 #define TABFORGE_MESH_PREVIEW_LEN 96
 #define TABFORGE_APP_STORE_MAX_BYTES 12288
 #define TABFORGE_APP_PACKAGE_MAX_BYTES 8192
@@ -317,6 +318,14 @@ typedef struct {
 } mesh_node_t;
 
 typedef struct {
+    char direction[4];
+    char channel[16];
+    char node[32];
+    char text[TABFORGE_MESH_PREVIEW_LEN];
+    uint32_t sequence;
+} mesh_chat_entry_t;
+
+typedef struct {
     char id[TABFORGE_APP_ID_LEN];
     char name[TABFORGE_APP_NAME_LEN];
     char summary[TABFORGE_APP_SUMMARY_LEN];
@@ -361,11 +370,12 @@ static const mesh_channel_t g_mesh_channels[] = {
 
 static const mesh_node_t g_mesh_nodes[] = {
     {"Broadcast", "ALL", "^all", 3, -1, false, "now"},
+    {"ITSZ T-Deck", "TDK", "!a1cd2ac8", 3, -1, false, "heard"},
     {"ITSZ T-Deck 2", "TDK2", "!2d42b8ad", 3, 101, true, "USB"},
-    {"Unit C6L", "C6L", "!unit-c6l", 3, -1, false, "Grove"},
-    {"Pager Mesh", "PGR", "!37ac5686", 3, -1, false, "TCP"},
-    {"Field Node", "FLD", "!field", 2, 88, true, "saved"},
-    {"Repeater", "RPT", "!repeat", 5, -1, false, "saved"},
+    {"Unit C6L Bridge", "C6L", "^all", 3, -1, false, "Grove"},
+    {"ITSZ Mesh 3 Car", "ZM3", "!02e60d90", 3, -1, false, "heard"},
+    {"ITSZ Base", "BASE", "!04082e40", 3, -1, false, "heard"},
+    {"Pager Mesh", "PGR", "!37ac5686", 3, -1, false, "saved"},
 };
 
 static const char *g_mesh_drafts[] = {
@@ -391,7 +401,7 @@ static bool g_mesh_module_ready;
 static uint8_t g_mesh_channel_index;
 static uint8_t g_mesh_node_index;
 static uint8_t g_mesh_draft_index;
-static uint32_t g_mesh_saved_node_mask = 0x0000001e;
+static uint32_t g_mesh_saved_node_mask = 0x0000007e;
 static bool g_mesh_gps_share_enabled;
 static bool g_mesh_voice_recording;
 static bool g_mesh_voice_ready;
@@ -410,6 +420,10 @@ static char g_mesh_last_sent[TABFORGE_MESH_PREVIEW_LEN] = "none";
 static char g_mesh_last_received[TABFORGE_MESH_PREVIEW_LEN] = "none";
 static char g_mesh_last_transport[32] = "waiting";
 static char g_mesh_voice_text[TABFORGE_MESH_PREVIEW_LEN] = "Tap Voice to create a voice draft.";
+static mesh_chat_entry_t g_mesh_chat[TABFORGE_MESH_CHAT_LINES];
+static uint8_t g_mesh_chat_next;
+static uint8_t g_mesh_chat_count;
+static uint32_t g_mesh_chat_sequence;
 static char g_app_store_manifest_url[TABFORGE_APP_URL_LEN] = TABFORGE_APP_STORE_URL;
 static app_store_state_t g_app_store_state = APP_STORE_IDLE;
 static app_store_entry_t g_app_store_selected;
@@ -1197,6 +1211,38 @@ static void append_mesh_message(const char *direction, const char *channel, cons
     fclose(f);
 }
 
+static void mesh_record_chat_line(const char *direction, const char *channel, const char *node, const char *text)
+{
+    if (direction == NULL || channel == NULL || node == NULL || text == NULL || text[0] == '\0') {
+        return;
+    }
+
+    mesh_chat_entry_t *entry = &g_mesh_chat[g_mesh_chat_next];
+    strlcpy(entry->direction, direction, sizeof(entry->direction));
+    strlcpy(entry->channel, channel, sizeof(entry->channel));
+    strlcpy(entry->node, node, sizeof(entry->node));
+    strlcpy(entry->text, text, sizeof(entry->text));
+    entry->sequence = ++g_mesh_chat_sequence;
+
+    g_mesh_chat_next = (uint8_t)((g_mesh_chat_next + 1U) % TABFORGE_MESH_CHAT_LINES);
+    if (g_mesh_chat_count < TABFORGE_MESH_CHAT_LINES) {
+        g_mesh_chat_count++;
+    }
+}
+
+static bool mesh_chat_entry_matches_node(const mesh_chat_entry_t *entry, const mesh_node_t *node)
+{
+    if (entry == NULL || node == NULL || entry->sequence == 0U) {
+        return false;
+    }
+    if (strcmp(node->node_id, "^all") == 0 || strcmp(entry->node, "^all") == 0) {
+        return true;
+    }
+    return strcmp(entry->node, node->node_id) == 0 ||
+           strcmp(entry->node, node->short_name) == 0 ||
+           strcmp(entry->node, node->name) == 0;
+}
+
 static void mesh_copy_preview_from_bytes(const uint8_t *data, size_t data_len, char *buffer, size_t buffer_size)
 {
     if (buffer == NULL || buffer_size == 0) {
@@ -1628,6 +1674,7 @@ static bool meshtastic_parse_from_radio(const char *source, const uint8_t *paylo
                     snprintf(node_label, sizeof(node_label), "!%08lx", (unsigned long)from_node);
                     strlcpy(g_mesh_last_received, text, sizeof(g_mesh_last_received));
                     g_mesh_received_count++;
+                    mesh_record_chat_line("RX", mesh_channel_name_by_index(channel), node_label, text);
                     append_mesh_message("rx", mesh_channel_name_by_index(channel), node_label, text);
                     handled = true;
                 }
@@ -1725,6 +1772,7 @@ static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_
     snprintf(g_mesh_last_transport, sizeof(g_mesh_last_transport), "%s raw", source != NULL ? source : "mesh");
     g_mesh_received_count++;
     g_mesh_module_ready = true;
+    mesh_record_chat_line("RX", selected_mesh_channel()->name, source != NULL ? source : "mesh", preview);
     append_mesh_message("rx", selected_mesh_channel()->name, source != NULL ? source : "mesh", preview);
     request_active_app_refresh();
 }
@@ -3515,7 +3563,10 @@ static bool meshtastic_send_config_request(void)
     return sent;
 }
 
-static void mesh_send_text(const char *text, bool voice)
+static void mesh_send_text_to_node(const char *text,
+                                   bool voice,
+                                   const mesh_channel_t *channel,
+                                   const mesh_node_t *node)
 {
     if (text == NULL || text[0] == '\0') {
         set_activity("Mesh Message", "No message text selected.");
@@ -3526,8 +3577,12 @@ static void mesh_send_text(const char *text, bool voice)
         start_accessory_probe_tasks();
     }
 
-    const mesh_channel_t *channel = selected_mesh_channel();
-    const mesh_node_t *node = selected_mesh_node();
+    if (channel == NULL) {
+        channel = selected_mesh_channel();
+    }
+    if (node == NULL) {
+        node = selected_mesh_node();
+    }
     bool sent = false;
     char transport[32] = "none";
 
@@ -3582,6 +3637,7 @@ static void mesh_send_text(const char *text, bool voice)
         g_mesh_voice_count++;
     }
     g_mesh_last_send_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    mesh_record_chat_line("TX", channel->name, node->node_id, text);
     append_mesh_message("tx", channel->name, node->node_id, text);
 
     char detail[128];
@@ -3593,6 +3649,11 @@ static void mesh_send_text(const char *text, bool voice)
              channel->name);
     set_activity("Mesh Sent", detail);
     request_active_app_refresh();
+}
+
+static void mesh_send_text(const char *text, bool voice)
+{
+    mesh_send_text_to_node(text, voice, selected_mesh_channel(), selected_mesh_node());
 }
 
 static void mesh_capture_voice_draft(void)
@@ -3626,7 +3687,8 @@ static void mesh_next_node_button_event_cb(lv_event_t *event)
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
         return;
     }
-    g_mesh_node_index = (uint8_t)((g_mesh_node_index + 1U) % TABFORGE_MESH_MAX_NODES);
+    size_t node_count = sizeof(g_mesh_nodes) / sizeof(g_mesh_nodes[0]);
+    g_mesh_node_index = (uint8_t)((g_mesh_node_index + 1U) % node_count);
     const mesh_node_t *node = selected_mesh_node();
     set_activity("Mesh Node", node->name);
     append_event("mesh_node_next");
@@ -3650,6 +3712,23 @@ static void mesh_send_draft_button_event_cb(lv_event_t *event)
         return;
     }
     mesh_send_text(selected_mesh_draft(), false);
+}
+
+static void mesh_test_all_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    const mesh_channel_t *channel = selected_mesh_channel();
+    char text[TABFORGE_MESH_PREVIEW_LEN];
+    snprintf(text,
+             sizeof(text),
+             "TabForge all-devices test on %s ch%u: T-Decks and C6L reply.",
+             channel->name,
+             (unsigned)channel->index);
+    mesh_send_text_to_node(text, false, channel, &g_mesh_nodes[0]);
+    append_event("mesh_test_all");
 }
 
 static void mesh_toggle_gps_button_event_cb(lv_event_t *event)
@@ -4400,7 +4479,14 @@ static void render_mesh_messenger_locked(lv_obj_t *card, lv_coord_t width, bool 
     const mesh_node_t *node = selected_mesh_node();
     char line[192];
     char saved_nodes[128] = "";
+    uint32_t matching_messages = 0;
     size_t node_count = sizeof(g_mesh_nodes) / sizeof(g_mesh_nodes[0]);
+    for (uint8_t offset = 0; offset < g_mesh_chat_count; ++offset) {
+        uint8_t index = (uint8_t)((g_mesh_chat_next + TABFORGE_MESH_CHAT_LINES - 1U - offset) % TABFORGE_MESH_CHAT_LINES);
+        if (mesh_chat_entry_matches_node(&g_mesh_chat[index], node)) {
+            matching_messages++;
+        }
+    }
 
     snprintf(line,
              sizeof(line),
@@ -4428,6 +4514,14 @@ static void render_mesh_messenger_locked(lv_obj_t *card, lv_coord_t width, bool 
              node->hop_limit,
              mesh_node_is_saved(g_mesh_node_index) ? "saved" : "not saved");
     add_app_status_line(card, "To", line, width, 0xf1f7f3);
+
+    snprintf(line,
+             sizeof(line),
+             "%s | seen %s | chat %lu buffered",
+             strcmp(node->node_id, "^all") == 0 ? "channel broadcast" : "direct mesh",
+             node->last_seen,
+             (unsigned long)matching_messages);
+    add_app_status_line(card, "Thread", line, width, 0x61d5f0);
 
     snprintf(line,
              sizeof(line),
@@ -4472,6 +4566,31 @@ static void render_mesh_messenger_locked(lv_obj_t *card, lv_coord_t width, bool 
              g_mesh_last_sent,
              g_mesh_last_received);
     add_app_status_line(card, "Recent", line, width, 0x70a7ff);
+
+    uint8_t shown = 0;
+    for (uint8_t offset = 0; offset < g_mesh_chat_count && shown < 3U; ++offset) {
+        uint8_t index = (uint8_t)((g_mesh_chat_next + TABFORGE_MESH_CHAT_LINES - 1U - offset) % TABFORGE_MESH_CHAT_LINES);
+        const mesh_chat_entry_t *entry = &g_mesh_chat[index];
+        if (!mesh_chat_entry_matches_node(entry, node)) {
+            continue;
+        }
+
+        char chat_title[12];
+        snprintf(chat_title, sizeof(chat_title), shown == 0U ? "Chat" : "Chat %u", (unsigned)(shown + 1U));
+        snprintf(line,
+                 sizeof(line),
+                 "#%lu %s %.12s %.24s: %.80s",
+                 (unsigned long)entry->sequence,
+                 entry->direction,
+                 entry->channel,
+                 entry->node,
+                 entry->text);
+        add_app_status_line(card, chat_title, line, width, 0xf1f7f3);
+        shown++;
+    }
+    if (shown == 0U) {
+        add_app_status_line(card, "Chat", "No messages in this thread yet.", width, 0x93a6ad);
+    }
 
     for (size_t i = 1; i < node_count; ++i) {
         if (!mesh_node_is_saved((uint8_t)i)) {
@@ -4547,7 +4666,7 @@ static void add_app_actions(lv_obj_t *parent,
     lv_obj_remove_style_all(actions);
     lv_coord_t action_h = landscape ? 112 : 236;
     if (app_id == APP_MESSAGES) {
-        action_h = landscape ? 232 : 348;
+        action_h = landscape ? 286 : 408;
     } else if (app_id == APP_IR || app_id == APP_STORE) {
         action_h = landscape ? 174 : 348;
     }
@@ -4584,6 +4703,7 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Node", mesh_next_node_button_event_cb);
         make_button(actions, button_w, "Draft", mesh_next_draft_button_event_cb);
         make_button(actions, button_w, "Send", mesh_send_draft_button_event_cb);
+        make_button(actions, button_w, "Test All", mesh_test_all_button_event_cb);
         make_button(actions, button_w, "GPS", mesh_toggle_gps_button_event_cb);
         make_button(actions, button_w, "Voice", mesh_voice_button_event_cb);
         make_button(actions, button_w, "Send Voice", mesh_send_voice_button_event_cb);
