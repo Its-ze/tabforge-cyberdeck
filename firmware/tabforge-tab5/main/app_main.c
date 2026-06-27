@@ -79,6 +79,9 @@
 #define TABFORGE_EVENT_LOG_PATH TABFORGE_SD_ROOT "/tabforge/logs/events.jsonl"
 #define TABFORGE_MESH_LOG_PATH TABFORGE_SD_ROOT "/tabforge/mesh/messages.jsonl"
 #define TABFORGE_MANIFEST_URL "https://its-ze.github.io/tabforge-cyberdeck/manifest.json"
+#define TABFORGE_APP_STORE_URL "https://its-ze.github.io/tabforge-cyberdeck/app-store.json"
+#define TABFORGE_APP_STORE_PATH TABFORGE_SD_ROOT "/tabforge/apps/store.json"
+#define TABFORGE_APP_INSTALLED_INDEX_PATH TABFORGE_SD_ROOT "/tabforge/apps/installed.jsonl"
 
 #define IMU_SAMPLE_PERIOD_MS 100
 #define ROTATION_CHECK_MS 150
@@ -132,6 +135,14 @@
 #define TABFORGE_MESH_MAX_NODES 6
 #define TABFORGE_MESH_MAX_DRAFTS 6
 #define TABFORGE_MESH_PREVIEW_LEN 96
+#define TABFORGE_APP_STORE_MAX_BYTES 12288
+#define TABFORGE_APP_PACKAGE_MAX_BYTES 8192
+#define TABFORGE_APP_ID_LEN 32
+#define TABFORGE_APP_NAME_LEN 48
+#define TABFORGE_APP_SUMMARY_LEN 112
+#define TABFORGE_APP_VERSION_LEN 24
+#define TABFORGE_APP_URL_LEN 192
+#define TABFORGE_APP_SHA_LEN 65
 
 typedef enum {
     FEATURE_ACTIVE,
@@ -148,6 +159,7 @@ typedef enum {
     APP_RECORDER,
     APP_USB,
     APP_FILES,
+    APP_STORE,
     APP_UPDATE,
 } app_id_t;
 
@@ -195,6 +207,15 @@ typedef enum {
     OTA_STATE_READY_REBOOT,
     OTA_STATE_ERROR,
 } ota_state_t;
+
+typedef enum {
+    APP_STORE_IDLE,
+    APP_STORE_FETCHING,
+    APP_STORE_READY,
+    APP_STORE_INSTALLING,
+    APP_STORE_INSTALLED,
+    APP_STORE_ERROR,
+} app_store_state_t;
 
 typedef enum {
     NAV_PAGE_APPS,
@@ -283,6 +304,16 @@ typedef struct {
     const char *last_seen;
 } mesh_node_t;
 
+typedef struct {
+    char id[TABFORGE_APP_ID_LEN];
+    char name[TABFORGE_APP_NAME_LEN];
+    char summary[TABFORGE_APP_SUMMARY_LEN];
+    char version[TABFORGE_APP_VERSION_LEN];
+    char package_url[TABFORGE_APP_URL_LEN];
+    char sha256[TABFORGE_APP_SHA_LEN];
+    uint32_t size;
+} app_store_entry_t;
+
 static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_WIFI, "Wi-Fi", "Scan, connect, and prepare internet OTA.", "Internet", "tile_wifi", APP_WIFI, FEATURE_ACTIVE, 0x70a7ff},
     {LV_SYMBOL_ENVELOPE, "Messages", "Meshtastic C6L channel text and direct sends.", "Grove", "tile_meshtastic", APP_MESSAGES, FEATURE_ACTIVE, 0x43d17a},
@@ -292,6 +323,7 @@ static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_AUDIO, "Recorder", "Live mic level now, push-to-record WAV flow next.", "Live", "tile_mic", APP_RECORDER, FEATURE_ACTIVE, 0xb982ff},
     {LV_SYMBOL_USB, "USB Bay", "Host-side CDC serial workbench for add-ons.", "Host", "tile_usb", APP_USB, FEATURE_ACTIVE, 0x70a7ff},
     {LV_SYMBOL_SD_CARD, "Files", "Runtime config, event journal, audio, and backups.", "SD", "tile_sd", APP_FILES, FEATURE_ACTIVE, 0x77dd88},
+    {LV_SYMBOL_DOWNLOAD, "Store", "GitHub app catalog with SD-installed mini apps.", "Apps", "tile_store", APP_STORE, FEATURE_ACTIVE, 0x5ec8ff},
     {LV_SYMBOL_DOWNLOAD, "Update", "Internet OTA package checks and confirm button.", "OTA", "tile_update", APP_UPDATE, FEATURE_ACTIVE, 0xffc857},
 };
 
@@ -353,6 +385,15 @@ static uint64_t g_mesh_last_send_ms;
 static char g_mesh_last_sent[TABFORGE_MESH_PREVIEW_LEN] = "none";
 static char g_mesh_last_received[TABFORGE_MESH_PREVIEW_LEN] = "none";
 static char g_mesh_voice_text[TABFORGE_MESH_PREVIEW_LEN] = "Tap Voice to create a voice draft.";
+static char g_app_store_manifest_url[TABFORGE_APP_URL_LEN] = TABFORGE_APP_STORE_URL;
+static app_store_state_t g_app_store_state = APP_STORE_IDLE;
+static app_store_entry_t g_app_store_selected;
+static uint32_t g_app_store_count;
+static uint32_t g_app_store_selected_index;
+static uint32_t g_app_store_installed_count;
+static esp_err_t g_app_store_last_error = ESP_OK;
+static char g_app_store_last_status[TABFORGE_APP_SUMMARY_LEN] = "Fetch the GitHub app catalog.";
+static char g_app_store_last_hash[TABFORGE_APP_SHA_LEN] = "";
 static nav_page_t g_nav_page = NAV_PAGE_APPS;
 static app_id_t g_active_app = APP_NONE;
 static uint32_t g_heartbeat_count;
@@ -612,6 +653,25 @@ static const char *ota_state_text(void)
     case OTA_STATE_ERROR:
         return "error";
     case OTA_STATE_IDLE:
+    default:
+        return "idle";
+    }
+}
+
+static const char *app_store_state_text(void)
+{
+    switch (g_app_store_state) {
+    case APP_STORE_FETCHING:
+        return "fetching";
+    case APP_STORE_READY:
+        return "ready";
+    case APP_STORE_INSTALLING:
+        return "installing";
+    case APP_STORE_INSTALLED:
+        return "installed";
+    case APP_STORE_ERROR:
+        return "error";
+    case APP_STORE_IDLE:
     default:
         return "idle";
     }
@@ -930,6 +990,7 @@ static void write_default_config_if_missing(void)
             "  \"ui\": { \"home\": \"tablet\", \"autoRotate\": true, \"liveStats\": true, \"screenTimeoutSeconds\": 120, \"sleepOnTimeout\": true },\n"
             "  \"wifi\": { \"ssid\": \"\", \"password\": \"\", \"autoConnect\": false },\n"
             "  \"mesh\": { \"defaultChannel\": 0, \"gpsShare\": false, \"saveNodes\": true, \"voiceDrafts\": true, \"storeSecrets\": false },\n"
+            "  \"appStore\": { \"manifestUrl\": \"%s\", \"installRoot\": \"/tabforge/apps\", \"cacheOnSd\": true, \"nativeCode\": false },\n"
             "  \"devices\": {\n"
             "    \"unit-c6l\": { \"enabled\": true, \"preferredTransport\": \"grove-uart\", \"mode\": \"meshtastic\" },\n"
             "    \"tdeck\": { \"enabled\": true, \"preferredTransport\": \"usb-cdc\", \"mode\": \"zdeck-meshtastic\" },\n"
@@ -937,6 +998,7 @@ static void write_default_config_if_missing(void)
             "  },\n"
             "  \"ota\": { \"manifestUrl\": \"%s\", \"requireButtonConfirm\": true }\n"
             "}\n",
+            TABFORGE_APP_STORE_URL,
             TABFORGE_MANIFEST_URL);
     fclose(f);
     ESP_LOGI(TABFORGE_TAG, "created default config at %s", TABFORGE_CONFIG_PATH);
@@ -1052,6 +1114,11 @@ static void load_runtime_config(void)
         copy_json_string(ota, "manifestUrl", g_ota_manifest_url, sizeof(g_ota_manifest_url));
     }
 
+    cJSON *app_store = cJSON_GetObjectItemCaseSensitive(root, "appStore");
+    if (cJSON_IsObject(app_store)) {
+        copy_json_string(app_store, "manifestUrl", g_app_store_manifest_url, sizeof(g_app_store_manifest_url));
+    }
+
     cJSON_Delete(root);
 }
 
@@ -1092,6 +1159,40 @@ static void append_mesh_message(const char *direction, const char *channel, cons
             text,
             TABFORGE_VERSION);
     fclose(f);
+}
+
+static void mesh_copy_preview_from_bytes(const uint8_t *data, size_t data_len, char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+    if (data == NULL || data_len == 0) {
+        strlcpy(buffer, "empty", buffer_size);
+        return;
+    }
+
+    size_t out = 0;
+    for (size_t i = 0; i < data_len && out < buffer_size - 1U; ++i) {
+        uint8_t value = data[i];
+        if (value >= 32U && value <= 126U) {
+            buffer[out++] = (char)value;
+        } else if (value == '\r' || value == '\n' || value == '\t') {
+            buffer[out++] = ' ';
+        } else {
+            buffer[out++] = '.';
+        }
+    }
+    buffer[out] = '\0';
+}
+
+static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_len)
+{
+    char preview[TABFORGE_MESH_PREVIEW_LEN];
+    mesh_copy_preview_from_bytes(data, data_len, preview, sizeof(preview));
+    strlcpy(g_mesh_last_received, preview, sizeof(g_mesh_last_received));
+    g_mesh_received_count++;
+    g_mesh_module_ready = true;
+    append_mesh_message("rx", selected_mesh_channel()->name, source != NULL ? source : "mesh", preview);
 }
 
 static esp_err_t mount_sdcard_with_config(bool format_if_mount_failed)
@@ -1153,6 +1254,8 @@ static void init_sdcard(void)
     ensure_dir(TABFORGE_SD_ROOT "/tabforge/ir");
     ensure_dir(TABFORGE_SD_ROOT "/tabforge/logs");
     ensure_dir(TABFORGE_SD_ROOT "/tabforge/mesh");
+    ensure_dir(TABFORGE_SD_ROOT "/tabforge/apps");
+    ensure_dir(TABFORGE_SD_ROOT "/tabforge/apps/cache");
     write_default_config_if_missing();
     if (g_sd_recovered) {
         write_sd_recovery_marker();
