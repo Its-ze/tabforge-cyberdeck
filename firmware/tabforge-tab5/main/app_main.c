@@ -398,6 +398,8 @@ static char g_app_store_last_status[TABFORGE_APP_SUMMARY_LEN] = "Fetch the GitHu
 static char g_app_store_last_hash[TABFORGE_APP_SHA_LEN] = "";
 static nav_page_t g_nav_page = NAV_PAGE_APPS;
 static app_id_t g_active_app = APP_NONE;
+static volatile bool g_active_app_refresh_requested;
+static bool g_preserve_activity_on_app_render;
 static uint32_t g_heartbeat_count;
 static bool g_ext_power_ready;
 static esp_err_t g_ext_power_error = ESP_OK;
@@ -1481,6 +1483,13 @@ static void set_activity(const char *title, const char *detail)
     }
     if (g_ui.activity_detail_label != NULL) {
         lv_label_set_text(g_ui.activity_detail_label, detail);
+    }
+}
+
+static void request_active_app_refresh(void)
+{
+    if (g_nav_page == NAV_PAGE_APP) {
+        g_active_app_refresh_requested = true;
     }
 }
 
