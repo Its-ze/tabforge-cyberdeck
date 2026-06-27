@@ -2894,7 +2894,9 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Paths", line_c, width - 32, 0x93a6ad);
         break;
     case APP_UPDATE:
-        snprintf(line_a, sizeof(line_a), "%s | manifest %s", ota_state_text(), g_ota_manifest_url);
+        snprintf(line_a, sizeof(line_a), "%s | manifest %s",
+                 ota_state_text(),
+                 g_ota_manifest_url[0] ? "configured" : "missing");
         snprintf(line_b, sizeof(line_b), "remote %s | running %s",
                  g_ota_version[0] ? g_ota_version : "unknown",
                  TABFORGE_VERSION);
