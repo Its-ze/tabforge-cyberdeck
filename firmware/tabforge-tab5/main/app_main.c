@@ -86,6 +86,8 @@
 #define IMU_SAMPLE_PERIOD_MS 100
 #define ROTATION_CHECK_MS 150
 #define ROTATION_CONFIRM_SAMPLES 2
+#define IMU_RETRY_DELAY_MS 5000
+#define IMU_RETRY_MAX_ATTEMPTS 6
 #define STATS_REFRESH_MS 1000
 #define MIC_SAMPLE_RATE 16000
 #define MIC_SAMPLES 512
@@ -474,6 +476,8 @@ static sensor_event_handler_instance_t g_imu_handler_instance;
 #endif
 static bool g_imu_online;
 static bool g_imu_ready;
+static esp_err_t g_imu_last_error = ESP_OK;
+static uint32_t g_imu_init_attempts;
 
 static void render_active_app_page_locked(void);
 static void init_ir_probe(void);
@@ -4343,8 +4347,13 @@ static void check_screen_power_locked(void)
     }
 }
 
-static void init_imu(void)
+static esp_err_t init_imu(void)
 {
+    if (g_imu_sensor_handle != NULL) {
+        return ESP_OK;
+    }
+
+    g_imu_init_attempts++;
     bsp_sensor_config_t imu_config = {
         .type = IMU_ID,
         .mode = MODE_POLLING,
@@ -4352,32 +4361,64 @@ static void init_imu(void)
     };
 
     esp_err_t err = bsp_sensor_init(&imu_config, &g_imu_sensor_handle);
+    g_imu_last_error = err;
     if (err != ESP_OK) {
         g_imu_online = false;
-        ESP_LOGW(TABFORGE_TAG, "IMU init failed: %s", esp_err_to_name(err));
-        return;
+        ESP_LOGW(TABFORGE_TAG, "IMU init attempt %lu failed: %s",
+                 (unsigned long)g_imu_init_attempts,
+                 esp_err_to_name(err));
+        return err;
     }
 
     err = iot_sensor_handler_register(g_imu_sensor_handle, sensor_event_handler, &g_imu_handler_instance);
+    g_imu_last_error = err;
     if (err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "IMU handler register failed: %s", esp_err_to_name(err));
-        return;
+        return err;
     }
 
     err = iot_sensor_start(g_imu_sensor_handle);
+    g_imu_last_error = err;
     if (err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "IMU start failed: %s", esp_err_to_name(err));
-        return;
+        return err;
     }
 
     g_imu_online = true;
     append_event("imu_started");
+    ESP_LOGI(TABFORGE_TAG, "IMU init attempt %lu started", (unsigned long)g_imu_init_attempts);
+    return ESP_OK;
+}
+
+static void imu_retry_task(void *arg)
+{
+    (void)arg;
+
+    while (!g_imu_ready && g_imu_sensor_handle == NULL && g_imu_init_attempts < IMU_RETRY_MAX_ATTEMPTS) {
+        vTaskDelay(pdMS_TO_TICKS(IMU_RETRY_DELAY_MS));
+        ESP_LOGI(TABFORGE_TAG, "retrying IMU init after delayed settle");
+        esp_err_t err = init_imu();
+        if (err == ESP_OK) {
+            update_activity_from_task("IMU", "Auto-rotate sensor recovered.");
+            break;
+        }
+    }
+
+    if (!g_imu_ready && g_imu_sensor_handle == NULL) {
+        ESP_LOGW(TABFORGE_TAG,
+                 "IMU unavailable after %lu attempts: %s",
+                 (unsigned long)g_imu_init_attempts,
+                 esp_err_to_name(g_imu_last_error));
+    }
+    vTaskDelete(NULL);
 }
 #else
-static void init_imu(void)
+static esp_err_t init_imu(void)
 {
     g_imu_online = false;
+    g_imu_last_error = ESP_ERR_NOT_SUPPORTED;
     ESP_LOGW(TABFORGE_TAG, "IMU not available in this BSP build");
+    return ESP_ERR_NOT_SUPPORTED;
 }
 #endif
 
@@ -4946,8 +4987,13 @@ void app_main(void)
         bsp_display_unlock();
     }
 
+    esp_err_t imu_err = init_imu();
     init_wifi_station();
-    init_imu();
+    if (imu_err != ESP_OK) {
+#if BSP_CAPS_IMU
+        xTaskCreate(imu_retry_task, "tabforge-imu-retry", 4096, NULL, 4, NULL);
+#endif
+    }
 
     xTaskCreate(battery_monitor_task, "tabforge-battery", 4096, NULL, 4, NULL);
     xTaskCreate(heartbeat_task, "tabforge-heartbeat", 4096, NULL, 5, NULL);
