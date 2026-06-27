@@ -486,6 +486,7 @@ static void init_ir_probe(void);
 static void init_grove_uart_probe(void);
 static void poll_grove_uart(void);
 static void grove_uart_send_line(const char *line);
+static void request_active_app_refresh(void);
 static axis3_t g_last_acce;
 static axis3_t g_last_gyro;
 static uint64_t g_last_imu_ms;
@@ -1200,6 +1201,7 @@ static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_
     g_mesh_received_count++;
     g_mesh_module_ready = true;
     append_mesh_message("rx", selected_mesh_channel()->name, source != NULL ? source : "mesh", preview);
+    request_active_app_refresh();
 }
 
 static esp_err_t mount_sdcard_with_config(bool format_if_mount_failed)
@@ -2965,6 +2967,7 @@ static void mesh_send_text(const char *text, bool voice)
              node->short_name,
              channel->name);
     set_activity("Mesh Sent", detail);
+    request_active_app_refresh();
 }
 
 static void mesh_capture_voice_draft(void)
@@ -2978,6 +2981,7 @@ static void mesh_capture_voice_draft(void)
     g_mesh_voice_recording = false;
     append_event("mesh_voice_draft_ready");
     set_activity("Voice Draft", g_mesh_voice_text);
+    request_active_app_refresh();
 }
 
 static void mesh_next_channel_button_event_cb(lv_event_t *event)
@@ -2989,6 +2993,7 @@ static void mesh_next_channel_button_event_cb(lv_event_t *event)
     const mesh_channel_t *channel = selected_mesh_channel();
     set_activity("Mesh Channel", channel->name);
     append_event("mesh_channel_next");
+    request_active_app_refresh();
 }
 
 static void mesh_next_node_button_event_cb(lv_event_t *event)
@@ -3000,6 +3005,7 @@ static void mesh_next_node_button_event_cb(lv_event_t *event)
     const mesh_node_t *node = selected_mesh_node();
     set_activity("Mesh Node", node->name);
     append_event("mesh_node_next");
+    request_active_app_refresh();
 }
 
 static void mesh_next_draft_button_event_cb(lv_event_t *event)
@@ -3010,6 +3016,7 @@ static void mesh_next_draft_button_event_cb(lv_event_t *event)
     g_mesh_draft_index = (uint8_t)((g_mesh_draft_index + 1U) % TABFORGE_MESH_MAX_DRAFTS);
     set_activity("Mesh Draft", selected_mesh_draft());
     append_event("mesh_draft_next");
+    request_active_app_refresh();
 }
 
 static void mesh_send_draft_button_event_cb(lv_event_t *event)
@@ -3028,6 +3035,7 @@ static void mesh_toggle_gps_button_event_cb(lv_event_t *event)
     g_mesh_gps_share_enabled = !g_mesh_gps_share_enabled;
     set_activity("Mesh GPS", g_mesh_gps_share_enabled ? "GPS sharing requested." : "GPS sharing disabled.");
     append_event(g_mesh_gps_share_enabled ? "mesh_gps_on" : "mesh_gps_off");
+    request_active_app_refresh();
 }
 
 static void mesh_voice_button_event_cb(lv_event_t *event)
@@ -3057,6 +3065,7 @@ static void mesh_toggle_saved_node_button_event_cb(lv_event_t *event)
     }
     if (g_mesh_node_index == 0) {
         set_activity("Saved Nodes", "Broadcast is always available.");
+        request_active_app_refresh();
         return;
     }
     uint32_t bit = 1UL << g_mesh_node_index;
@@ -3068,6 +3077,7 @@ static void mesh_toggle_saved_node_button_event_cb(lv_event_t *event)
     }
     set_activity("Saved Nodes", will_save ? "Node saved." : "Node removed from saved list.");
     append_event(will_save ? "mesh_node_saved" : "mesh_node_unsaved");
+    request_active_app_refresh();
 }
 
 static void app_store_fetch_button_event_cb(lv_event_t *event)
@@ -3746,20 +3756,29 @@ static void render_mesh_messenger_locked(lv_obj_t *card, lv_coord_t width, bool 
     const mesh_channel_t *channel = selected_mesh_channel();
     const mesh_node_t *node = selected_mesh_node();
     char line[192];
+    char saved_nodes[128] = "";
+    size_t node_count = sizeof(g_mesh_nodes) / sizeof(g_mesh_nodes[0]);
 
     snprintf(line,
              sizeof(line),
-             "%.16s ch%u %s | GPS %s | saved %lu",
+             "%.24s | %.64s | GPS %s",
+             active_mode_name(),
+             active_mode_detail(),
+             g_mesh_gps_share_enabled ? "on" : "off");
+    add_app_status_line(card, "Mode", line, width, 0xf1f7f3);
+
+    snprintf(line,
+             sizeof(line),
+             "%.16s ch%u %s | saved nodes %lu",
              channel->name,
              (unsigned)channel->index,
              channel->role,
-             g_mesh_gps_share_enabled ? "on" : "off",
              (unsigned long)mesh_saved_node_count());
     add_app_status_line(card, "Channel", line, width, 0x43d17a);
 
     snprintf(line,
              sizeof(line),
-             "%.24s %.12s %.32s | hop %d | %s",
+             "%.24s (%.12s) %.32s | hop %d | %s",
              node->name,
              node->short_name,
              node->node_id,
@@ -3767,12 +3786,25 @@ static void render_mesh_messenger_locked(lv_obj_t *card, lv_coord_t width, bool 
              mesh_node_is_saved(g_mesh_node_index) ? "saved" : "not saved");
     add_app_status_line(card, "To", line, width, 0xf1f7f3);
 
-    snprintf(line, sizeof(line), "%.96s", selected_mesh_draft());
-    add_app_status_line(card, "Draft", line, width, 0x93a6ad);
+    snprintf(line,
+             sizeof(line),
+             "%.96s",
+             selected_mesh_draft());
+    add_app_status_line(card, "Draft", line, width, 0xffc857);
 
     snprintf(line,
              sizeof(line),
-             "%s | ready %s | voice sends %lu | avg %d peak %d",
+             "TX %lu RX %lu | Grove rx/tx %lu/%lu | USB rx %lu",
+             (unsigned long)g_mesh_sent_count,
+             (unsigned long)g_mesh_received_count,
+             (unsigned long)g_grove_rx_packets,
+             (unsigned long)g_grove_tx_packets,
+             (unsigned long)g_usb_rx_packets);
+    add_app_status_line(card, "Link", line, width, 0x61d5f0);
+
+    snprintf(line,
+             sizeof(line),
+             "%s | ready %s | sent %lu | avg %d peak %d",
              g_mesh_voice_recording ? "recording" : "idle",
              g_mesh_voice_ready ? "yes" : "no",
              (unsigned long)g_mesh_voice_count,
@@ -3782,34 +3814,29 @@ static void render_mesh_messenger_locked(lv_obj_t *card, lv_coord_t width, bool 
 
     snprintf(line,
              sizeof(line),
-             "TX %lu RX %lu | Grove %lu/%lu bytes | USB %lu/%lu bytes",
-             (unsigned long)g_mesh_sent_count,
-             (unsigned long)g_mesh_received_count,
-             (unsigned long)g_grove_rx_packets,
-             (unsigned long)g_grove_rx_bytes,
-             (unsigned long)g_usb_rx_packets,
-             (unsigned long)g_usb_rx_bytes);
-    add_app_status_line(card, "Link", line, width, 0x61d5f0);
+             "TX %.70s | RX %.70s",
+             g_mesh_last_sent,
+             g_mesh_last_received);
+    add_app_status_line(card, "Recent", line, width, 0x70a7ff);
 
-    snprintf(line, sizeof(line), "%.95s", g_mesh_last_sent);
-    add_app_status_line(card, "Last TX", line, width, 0xf0bf4f);
-    snprintf(line, sizeof(line), "%.95s", g_mesh_last_received);
-    add_app_status_line(card, "Last RX", line, width, 0x70a7ff);
-
-    make_text(card, "Saved / recent nodes", 0x8fb0bb, width);
-    size_t node_count = sizeof(g_mesh_nodes) / sizeof(g_mesh_nodes[0]);
-    for (size_t i = 0; i < node_count; ++i) {
-        const mesh_node_t *entry = &g_mesh_nodes[i];
-        snprintf(line,
-                 sizeof(line),
-                 "%c %.12s %.32s batt %s last %.12s",
-                 i == g_mesh_node_index ? '>' : ' ',
-                 entry->short_name,
-                 entry->node_id,
-                 entry->battery_percent >= 0 ? "ok" : "--",
-                 entry->last_seen);
-        add_app_status_line(card, entry->name, line, width, i == g_mesh_node_index ? 0x43d17a : 0x93a6ad);
+    for (size_t i = 1; i < node_count; ++i) {
+        if (!mesh_node_is_saved((uint8_t)i)) {
+            continue;
+        }
+        if (saved_nodes[0] != '\0') {
+            strlcat(saved_nodes, ", ", sizeof(saved_nodes));
+        }
+        strlcat(saved_nodes, g_mesh_nodes[i].short_name, sizeof(saved_nodes));
     }
+    if (saved_nodes[0] == '\0') {
+        strlcpy(saved_nodes, "none", sizeof(saved_nodes));
+    }
+
+    snprintf(line,
+             sizeof(line),
+             "%.96s",
+             saved_nodes);
+    add_app_status_line(card, "Saved", line, width, 0x93a6ad);
 }
 
 static void render_app_store_locked(lv_obj_t *card, lv_coord_t width)
@@ -3865,11 +3892,18 @@ static void add_app_actions(lv_obj_t *parent,
     lv_obj_t *actions = lv_obj_create(parent);
     lv_obj_remove_style_all(actions);
     lv_coord_t action_h = landscape ? 112 : 236;
-    if (app_id == APP_MESSAGES || app_id == APP_IR || app_id == APP_STORE) {
+    if (app_id == APP_MESSAGES) {
+        action_h = landscape ? 232 : 348;
+    } else if (app_id == APP_IR || app_id == APP_STORE) {
         action_h = landscape ? 174 : 348;
     }
     lv_obj_set_size(actions, width, action_h);
-    lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
+    if (app_id == APP_MESSAGES || app_id == APP_IR || app_id == APP_STORE) {
+        lv_obj_add_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(actions, LV_SCROLLBAR_MODE_AUTO);
+    } else {
+        lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
+    }
     lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(actions, 10, 0);
@@ -4104,7 +4138,9 @@ static void render_active_app_page_locked(void)
     }
 
     add_app_actions(card, width - 32, landscape, g_active_app);
-    set_activity(tile->name, tile->summary);
+    if (!g_preserve_activity_on_app_render) {
+        set_activity(tile->name, tile->summary);
+    }
 }
 
 static void build_pages(lv_obj_t *parent, lv_coord_t width, lv_coord_t height, bool landscape)
@@ -4921,6 +4957,12 @@ static void stats_task(void *arg)
         if (bsp_display_lock(1000)) {
             check_screen_power_locked();
             refresh_live_stats_locked();
+            if (g_active_app_refresh_requested && g_nav_page == NAV_PAGE_APP && g_ui.page_app != NULL) {
+                g_active_app_refresh_requested = false;
+                g_preserve_activity_on_app_render = true;
+                render_active_app_page_locked();
+                g_preserve_activity_on_app_render = false;
+            }
             bsp_display_unlock();
         }
         vTaskDelay(pdMS_TO_TICKS(STATS_REFRESH_MS));
