@@ -14,7 +14,6 @@
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_heap_caps.h"
-#include "esp_https_ota.h"
 #include "esp_io_expander.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -28,7 +27,9 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
+#include "usb/cdc_acm_host.h"
 #include "cJSON.h"
+#include "mbedtls/sha256.h"
 
 #ifndef TABFORGE_VERSION
 #define TABFORGE_VERSION "0.1.0"
@@ -83,6 +84,8 @@
 #define STATS_REFRESH_MS 1000
 #define MIC_SAMPLE_RATE 16000
 #define MIC_SAMPLES 512
+#define USB_CDC_BAUDRATE 115200
+#define USB_CDC_SCAN_TIMEOUT_MS 2500
 #define TABFORGE_EXT5V_EN IO_EXPANDER_PIN_NUM_2
 #define TABFORGE_CHARGE_ENABLE IO_EXPANDER_PIN_NUM_7
 #define TABFORGE_GROVE_TX_GPIO GPIO_NUM_53
@@ -113,6 +116,7 @@
 #define TABFORGE_WIFI_MAX_PASSWORD 65
 #define TABFORGE_WIFI_CONNECT_TIMEOUT_MS 15000
 #define TABFORGE_OTA_MANIFEST_MAX_BYTES 8192
+#define TABFORGE_OTA_HTTP_CHUNK_SIZE 4096
 #define TABFORGE_PAHUB_I2C_ADDR 0x70
 
 typedef enum {
@@ -120,12 +124,26 @@ typedef enum {
     FEATURE_PLANNED,
 } feature_state_t;
 
+typedef enum {
+    APP_NONE,
+    APP_WIFI,
+    APP_MESSAGES,
+    APP_MESHCORE,
+    APP_TDECK,
+    APP_IR,
+    APP_RECORDER,
+    APP_USB,
+    APP_FILES,
+    APP_UPDATE,
+} app_id_t;
+
 typedef struct {
     const char *code;
     const char *name;
     const char *summary;
     const char *metric;
     const char *event_name;
+    app_id_t app_id;
     feature_state_t state;
     uint32_t accent;
 } feature_tile_t;
@@ -168,6 +186,7 @@ typedef enum {
     NAV_PAGE_APPS,
     NAV_PAGE_SETTINGS,
     NAV_PAGE_UPDATE,
+    NAV_PAGE_APP,
 } nav_page_t;
 
 typedef struct {
@@ -215,6 +234,7 @@ typedef struct {
     lv_obj_t *page_apps;
     lv_obj_t *page_settings;
     lv_obj_t *page_update;
+    lv_obj_t *page_app;
     nav_button_refs_t nav_apps;
     nav_button_refs_t nav_settings;
     nav_button_refs_t nav_mode;
@@ -233,13 +253,15 @@ typedef struct {
 } wifi_credentials_t;
 
 static const feature_tile_t g_tiles[] = {
-    {LV_SYMBOL_WIFI, "Wi-Fi", "Scan, connect, and prepare internet OTA.", "Internet", "tile_update", FEATURE_ACTIVE, 0x70a7ff},
-    {LV_SYMBOL_ENVELOPE, "Messages", "Meshtastic C6L channel text and direct sends.", "Grove", "tile_meshtastic", FEATURE_ACTIVE, 0x43d17a},
-    {LV_SYMBOL_SHUFFLE, "MeshCore", "Switchable command profile for MeshCore console work.", "Profile", "tile_meshcore", FEATURE_ACTIVE, 0x61d5f0},
-    {LV_SYMBOL_KEYBOARD, "T-Deck", "Companion bridge for the LilyGO T-Deck/Z-Deck flow.", "Bridge", "tile_tdeck", FEATURE_ACTIVE, 0xf0bf4f},
-    {LV_SYMBOL_AUDIO, "Recorder", "Live mic level now, push-to-record WAV flow next.", "Live", "tile_mic", FEATURE_ACTIVE, 0xb982ff},
-    {LV_SYMBOL_SD_CARD, "Files", "Runtime config, event journal, audio, and backups.", "SD", "tile_sd", FEATURE_ACTIVE, 0x77dd88},
-    {LV_SYMBOL_DOWNLOAD, "Update", "Internet OTA package checks and confirm button.", "OTA", "tile_update", FEATURE_ACTIVE, 0xffc857},
+    {LV_SYMBOL_WIFI, "Wi-Fi", "Scan, connect, and prepare internet OTA.", "Internet", "tile_wifi", APP_WIFI, FEATURE_ACTIVE, 0x70a7ff},
+    {LV_SYMBOL_ENVELOPE, "Messages", "Meshtastic C6L channel text and direct sends.", "Grove", "tile_meshtastic", APP_MESSAGES, FEATURE_ACTIVE, 0x43d17a},
+    {LV_SYMBOL_SHUFFLE, "MeshCore", "Switchable command profile for MeshCore console work.", "Profile", "tile_meshcore", APP_MESHCORE, FEATURE_ACTIVE, 0x61d5f0},
+    {LV_SYMBOL_KEYBOARD, "T-Deck", "Companion bridge for the LilyGO T-Deck/Z-Deck flow.", "Bridge", "tile_tdeck", APP_TDECK, FEATURE_ACTIVE, 0xf0bf4f},
+    {LV_SYMBOL_EYE_OPEN, "IR Lab", "Learn, label, replay, and store IR macros on SD.", "38 kHz", "tile_ir", APP_IR, FEATURE_ACTIVE, 0xff7a66},
+    {LV_SYMBOL_AUDIO, "Recorder", "Live mic level now, push-to-record WAV flow next.", "Live", "tile_mic", APP_RECORDER, FEATURE_ACTIVE, 0xb982ff},
+    {LV_SYMBOL_USB, "USB Bay", "Host-side CDC serial workbench for add-ons.", "Host", "tile_usb", APP_USB, FEATURE_ACTIVE, 0x70a7ff},
+    {LV_SYMBOL_SD_CARD, "Files", "Runtime config, event journal, audio, and backups.", "SD", "tile_sd", APP_FILES, FEATURE_ACTIVE, 0x77dd88},
+    {LV_SYMBOL_DOWNLOAD, "Update", "Internet OTA package checks and confirm button.", "OTA", "tile_update", APP_UPDATE, FEATURE_ACTIVE, 0xffc857},
 };
 
 static const screen_timeout_option_t g_screen_timeouts[] = {
@@ -262,6 +284,7 @@ static esp_err_t g_sd_last_error = ESP_OK;
 static bool g_meshcore_mode;
 static bool g_mesh_module_ready;
 static nav_page_t g_nav_page = NAV_PAGE_APPS;
+static app_id_t g_active_app = APP_NONE;
 static uint32_t g_heartbeat_count;
 static bool g_ext_power_ready;
 static esp_err_t g_ext_power_error = ESP_OK;
@@ -277,8 +300,16 @@ static esp_err_t g_grove_uart_error = ESP_OK;
 static uint32_t g_grove_rx_packets;
 static uint32_t g_grove_rx_bytes;
 static uint64_t g_grove_last_rx_ms;
+static bool g_usb_host_ready;
 static usb_state_t g_usb_state = USB_STATE_OFF;
 static esp_err_t g_usb_last_error = ESP_OK;
+static uint32_t g_usb_open_count;
+static uint32_t g_usb_disconnect_count;
+static uint32_t g_usb_rx_packets;
+static uint32_t g_usb_rx_bytes;
+static uint64_t g_usb_last_rx_ms;
+static cdc_acm_dev_hdl_t g_usb_cdc_handle;
+static bool g_usb_cdc_disconnected;
 static i2c_master_dev_handle_t g_battery_monitor;
 static bool g_battery_online;
 static esp_err_t g_battery_last_error = ESP_ERR_NOT_FOUND;
@@ -307,6 +338,8 @@ static char g_wifi_ip[16] = "--";
 static char g_ota_manifest_url[256] = TABFORGE_MANIFEST_URL;
 static char g_ota_firmware_url[256] = "";
 static char g_ota_version[32] = "";
+static char g_ota_sha256[65] = "";
+static uint32_t g_ota_size;
 static ota_state_t g_ota_state = OTA_STATE_IDLE;
 static esp_err_t g_ota_last_error = ESP_OK;
 static bool g_ota_reboot_pending;
@@ -322,6 +355,7 @@ static sensor_event_handler_instance_t g_imu_handler_instance;
 static bool g_imu_online;
 static bool g_imu_ready;
 
+static void render_active_app_page_locked(void);
 static void init_grove_uart_probe(void);
 static void poll_grove_uart(void);
 static axis3_t g_last_acce;
@@ -410,11 +444,11 @@ static const char *usb_state_text(void)
     case USB_STATE_POWERED:
         return "powered";
     case USB_STATE_SCANNING:
-        return "power on";
+        return "scanning";
     case USB_STATE_OPEN:
-        return "power on";
+        return "cdc open";
     case USB_STATE_DISCONNECTED:
-        return "power on";
+        return "disconnected";
     case USB_STATE_ERROR:
         return "error";
     case USB_STATE_OFF:
@@ -1232,7 +1266,7 @@ static void style_nav_button(const nav_button_refs_t *nav, bool active, uint32_t
 
 static void refresh_nav_styles(void)
 {
-    style_nav_button(&g_ui.nav_apps, g_nav_page == NAV_PAGE_APPS, 0x6ee7a2);
+    style_nav_button(&g_ui.nav_apps, g_nav_page == NAV_PAGE_APPS || g_nav_page == NAV_PAGE_APP, 0x6ee7a2);
     style_nav_button(&g_ui.nav_settings, g_nav_page == NAV_PAGE_SETTINGS, 0x61d5f0);
     style_nav_button(&g_ui.nav_mode, g_mesh_module_ready, 0xf0bf4f);
     style_nav_button(&g_ui.nav_auto, g_auto_rotate, 0x77dd88);
@@ -1245,6 +1279,7 @@ static void show_nav_page(nav_page_t page)
     set_obj_hidden(g_ui.page_apps, page != NAV_PAGE_APPS);
     set_obj_hidden(g_ui.page_settings, page != NAV_PAGE_SETTINGS);
     set_obj_hidden(g_ui.page_update, page != NAV_PAGE_UPDATE);
+    set_obj_hidden(g_ui.page_app, page != NAV_PAGE_APP);
 
     switch (page) {
     case NAV_PAGE_SETTINGS:
@@ -1253,8 +1288,12 @@ static void show_nav_page(nav_page_t page)
     case NAV_PAGE_UPDATE:
         set_activity("Wi-Fi & Internet", "Scan networks, type a password, connect, then run internet OTA.");
         break;
+    case NAV_PAGE_APP:
+        render_active_app_page_locked();
+        break;
     case NAV_PAGE_APPS:
     default:
+        g_active_app = APP_NONE;
         set_activity("Apps", "Launcher grid active: Wi-Fi, mesh profiles, T-Deck, mic, SD, and updates.");
         break;
     }
@@ -1573,13 +1612,10 @@ static void feature_tile_event_cb(lv_event_t *event)
         return;
     }
 
-    set_activity(tile->name, tile->summary);
+    g_active_app = tile->app_id;
+    show_nav_page(NAV_PAGE_APP);
     append_event(tile->event_name);
     ESP_LOGI(TABFORGE_TAG, "tile selected: %s", tile->name);
-
-    if (strcmp(tile->event_name, "tile_update") == 0) {
-        show_nav_page(NAV_PAGE_UPDATE);
-    }
 }
 
 static void add_app_tile(lv_obj_t *parent, const feature_tile_t *tile, lv_coord_t width, lv_coord_t height)
@@ -2123,9 +2159,21 @@ static void apps_button_event_cb(lv_event_t *event)
         return;
     }
 
+    g_active_app = APP_NONE;
     show_nav_page(NAV_PAGE_APPS);
     append_event("apps_button_selected");
     ESP_LOGI(TABFORGE_TAG, "apps button selected");
+}
+
+static void back_to_apps_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    g_active_app = APP_NONE;
+    show_nav_page(NAV_PAGE_APPS);
+    append_event("app_back_to_apps");
 }
 
 static void settings_button_event_cb(lv_event_t *event)
@@ -2216,16 +2264,18 @@ static void build_app_grid(lv_obj_t *parent, lv_coord_t width, lv_coord_t height
     lv_obj_set_style_pad_row(grid, 14, 0);
     lv_obj_set_style_pad_column(grid, 14, 0);
 
+    size_t tile_count = sizeof(g_tiles) / sizeof(g_tiles[0]);
     lv_coord_t columns = landscape ? 6 : 4;
+    lv_coord_t rows = (lv_coord_t)((tile_count + (size_t)columns - 1U) / (size_t)columns);
     lv_coord_t tile_w = (width - ((columns - 1) * 14)) / columns;
-    lv_coord_t tile_h = (height - 18) / 2;
+    lv_coord_t tile_h = (height - ((rows - 1) * 14)) / rows;
     if (tile_h > 118) {
         tile_h = 118;
     }
-    if (tile_h < 92) {
-        tile_h = 92;
+    if (tile_h < 84) {
+        tile_h = 84;
     }
-    for (size_t i = 0; i < sizeof(g_tiles) / sizeof(g_tiles[0]); ++i) {
+    for (size_t i = 0; i < tile_count; ++i) {
         add_app_tile(grid, &g_tiles[i], tile_w, tile_h);
     }
 }

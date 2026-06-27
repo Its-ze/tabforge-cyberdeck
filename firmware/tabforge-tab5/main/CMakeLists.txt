@@ -6,7 +6,6 @@ idf_component_register(
     REQUIRES
         app_update
         esp_http_client
-        esp_https_ota
         esp-tls
         esp_wifi
         driver
@@ -17,8 +16,11 @@ idf_component_register(
         fatfs
         heap
         json
+        mbedtls
         m5stack_tab5
         nvs_flash
+        usb
+        usb_host_cdc_acm
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
