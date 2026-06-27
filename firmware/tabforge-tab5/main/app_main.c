@@ -1221,11 +1221,508 @@ static void mesh_copy_preview_from_bytes(const uint8_t *data, size_t data_len, c
     buffer[out] = '\0';
 }
 
+static bool proto_put_byte(uint8_t *buffer, size_t buffer_size, size_t *offset, uint8_t value)
+{
+    if (buffer == NULL || offset == NULL || *offset >= buffer_size) {
+        return false;
+    }
+    buffer[(*offset)++] = value;
+    return true;
+}
+
+static bool proto_put_varint_raw(uint8_t *buffer, size_t buffer_size, size_t *offset, uint64_t value)
+{
+    do {
+        uint8_t byte = (uint8_t)(value & 0x7fU);
+        value >>= 7U;
+        if (value != 0U) {
+            byte |= 0x80U;
+        }
+        if (!proto_put_byte(buffer, buffer_size, offset, byte)) {
+            return false;
+        }
+    } while (value != 0U);
+    return true;
+}
+
+static bool proto_put_tag(uint8_t *buffer, size_t buffer_size, size_t *offset, uint32_t field, uint8_t wire_type)
+{
+    return proto_put_varint_raw(buffer, buffer_size, offset, ((uint64_t)field << 3U) | wire_type);
+}
+
+static bool proto_put_varint_field(uint8_t *buffer, size_t buffer_size, size_t *offset, uint32_t field, uint64_t value)
+{
+    return proto_put_tag(buffer, buffer_size, offset, field, 0) &&
+           proto_put_varint_raw(buffer, buffer_size, offset, value);
+}
+
+static bool proto_put_fixed32_field(uint8_t *buffer, size_t buffer_size, size_t *offset, uint32_t field, uint32_t value)
+{
+    if (!proto_put_tag(buffer, buffer_size, offset, field, 5) || buffer == NULL || offset == NULL || *offset + 4U > buffer_size) {
+        return false;
+    }
+    buffer[(*offset)++] = (uint8_t)(value & 0xffU);
+    buffer[(*offset)++] = (uint8_t)((value >> 8U) & 0xffU);
+    buffer[(*offset)++] = (uint8_t)((value >> 16U) & 0xffU);
+    buffer[(*offset)++] = (uint8_t)((value >> 24U) & 0xffU);
+    return true;
+}
+
+static bool proto_put_bytes_field(uint8_t *buffer,
+                                  size_t buffer_size,
+                                  size_t *offset,
+                                  uint32_t field,
+                                  const uint8_t *data,
+                                  size_t data_len)
+{
+    if (!proto_put_tag(buffer, buffer_size, offset, field, 2) ||
+        !proto_put_varint_raw(buffer, buffer_size, offset, data_len) ||
+        buffer == NULL ||
+        offset == NULL ||
+        data == NULL ||
+        *offset + data_len > buffer_size) {
+        return false;
+    }
+    memcpy(&buffer[*offset], data, data_len);
+    *offset += data_len;
+    return true;
+}
+
+static bool proto_read_varint(const uint8_t *buffer, size_t buffer_len, size_t *offset, uint64_t *value)
+{
+    if (buffer == NULL || offset == NULL || value == NULL) {
+        return false;
+    }
+
+    uint64_t result = 0;
+    uint8_t shift = 0;
+    while (*offset < buffer_len && shift < 64U) {
+        uint8_t byte = buffer[(*offset)++];
+        result |= ((uint64_t)(byte & 0x7fU)) << shift;
+        if ((byte & 0x80U) == 0U) {
+            *value = result;
+            return true;
+        }
+        shift += 7U;
+    }
+    return false;
+}
+
+static bool proto_read_fixed32(const uint8_t *buffer, size_t buffer_len, size_t *offset, uint32_t *value)
+{
+    if (buffer == NULL || offset == NULL || value == NULL || *offset + 4U > buffer_len) {
+        return false;
+    }
+    *value = (uint32_t)buffer[*offset] |
+             ((uint32_t)buffer[*offset + 1U] << 8U) |
+             ((uint32_t)buffer[*offset + 2U] << 16U) |
+             ((uint32_t)buffer[*offset + 3U] << 24U);
+    *offset += 4U;
+    return true;
+}
+
+static bool proto_skip_value(const uint8_t *buffer, size_t buffer_len, size_t *offset, uint8_t wire_type)
+{
+    uint64_t len = 0;
+    switch (wire_type) {
+    case 0:
+        return proto_read_varint(buffer, buffer_len, offset, &len);
+    case 1:
+        if (*offset + 8U > buffer_len) {
+            return false;
+        }
+        *offset += 8U;
+        return true;
+    case 2:
+        if (!proto_read_varint(buffer, buffer_len, offset, &len) || *offset + (size_t)len > buffer_len) {
+            return false;
+        }
+        *offset += (size_t)len;
+        return true;
+    case 5:
+        if (*offset + 4U > buffer_len) {
+            return false;
+        }
+        *offset += 4U;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static uint32_t mesh_node_num_from_id(const char *node_id)
+{
+    if (node_id == NULL || node_id[0] == '\0' || strcmp(node_id, "^all") == 0) {
+        return MESHTASTIC_BROADCAST_NUM;
+    }
+
+    size_t len = strlen(node_id);
+    if (len < 8U) {
+        return MESHTASTIC_BROADCAST_NUM;
+    }
+
+    const char *hex = node_id + len - 8U;
+    uint32_t value = 0;
+    for (size_t i = 0; i < 8U; ++i) {
+        char c = hex[i];
+        uint8_t nibble;
+        if (c >= '0' && c <= '9') {
+            nibble = (uint8_t)(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            nibble = (uint8_t)(10 + c - 'a');
+        } else if (c >= 'A' && c <= 'F') {
+            nibble = (uint8_t)(10 + c - 'A');
+        } else {
+            return MESHTASTIC_BROADCAST_NUM;
+        }
+        value = (value << 4U) | nibble;
+    }
+    return value;
+}
+
+static uint32_t meshtastic_next_packet_id(void)
+{
+    g_meshtastic_packet_seq = (g_meshtastic_packet_seq + 1U) & 0x3ffU;
+    return (esp_random() & 0xfffffc00UL) | g_meshtastic_packet_seq;
+}
+
+static const char *mesh_channel_name_by_index(uint8_t index)
+{
+    size_t count = sizeof(g_mesh_channels) / sizeof(g_mesh_channels[0]);
+    for (size_t i = 0; i < count; ++i) {
+        if (g_mesh_channels[i].index == index) {
+            return g_mesh_channels[i].name;
+        }
+    }
+    return "mesh";
+}
+
+static const char *mesh_transport_source_label(const char *source)
+{
+    if (source == NULL) {
+        return "mesh";
+    }
+    if (strcmp(source, "usb-cdc") == 0) {
+        return "usb";
+    }
+    if (strcmp(source, "grove-uart") == 0) {
+        return "grove";
+    }
+    return "mesh";
+}
+
+static bool meshtastic_build_text_frame(const char *text,
+                                        const mesh_channel_t *channel,
+                                        const mesh_node_t *node,
+                                        uint8_t *frame,
+                                        size_t frame_size,
+                                        size_t *frame_len)
+{
+    if (text == NULL || channel == NULL || node == NULL || frame == NULL || frame_len == NULL || frame_size < 8U) {
+        return false;
+    }
+
+    size_t text_len = strlen(text);
+    if (text_len > 233U) {
+        text_len = 233U;
+    }
+
+    uint8_t data[260];
+    uint8_t packet[360];
+    uint8_t to_radio[MESHTASTIC_MAX_PROTO_LEN];
+    size_t data_len = 0;
+    size_t packet_len = 0;
+    size_t to_radio_len = 0;
+
+    if (!proto_put_varint_field(data, sizeof(data), &data_len, 1, MESHTASTIC_TEXT_MESSAGE_APP) ||
+        !proto_put_bytes_field(data, sizeof(data), &data_len, 2, (const uint8_t *)text, text_len)) {
+        return false;
+    }
+
+    uint32_t destination = mesh_node_num_from_id(node->node_id);
+    uint32_t packet_id = meshtastic_next_packet_id();
+    uint32_t hop_limit = node->hop_limit > 0 ? (uint32_t)node->hop_limit : 3U;
+
+    if (!proto_put_fixed32_field(packet, sizeof(packet), &packet_len, 2, destination)) {
+        return false;
+    }
+    if (channel->index != 0U &&
+        !proto_put_varint_field(packet, sizeof(packet), &packet_len, 3, channel->index)) {
+        return false;
+    }
+    if (!proto_put_bytes_field(packet, sizeof(packet), &packet_len, 4, data, data_len) ||
+        !proto_put_fixed32_field(packet, sizeof(packet), &packet_len, 6, packet_id) ||
+        !proto_put_varint_field(packet, sizeof(packet), &packet_len, 9, hop_limit) ||
+        !proto_put_varint_field(packet, sizeof(packet), &packet_len, 10, 1) ||
+        !proto_put_varint_field(packet, sizeof(packet), &packet_len, 11, MESHTASTIC_RELIABLE_PRIORITY)) {
+        return false;
+    }
+
+    if (!proto_put_bytes_field(to_radio, sizeof(to_radio), &to_radio_len, 1, packet, packet_len) ||
+        to_radio_len + 4U > frame_size) {
+        return false;
+    }
+
+    frame[0] = MESHTASTIC_STREAM_START1;
+    frame[1] = MESHTASTIC_STREAM_START2;
+    frame[2] = (uint8_t)((to_radio_len >> 8U) & 0xffU);
+    frame[3] = (uint8_t)(to_radio_len & 0xffU);
+    memcpy(&frame[4], to_radio, to_radio_len);
+    *frame_len = to_radio_len + 4U;
+    return true;
+}
+
+static bool meshtastic_build_config_request_frame(uint8_t *frame, size_t frame_size, size_t *frame_len)
+{
+    if (frame == NULL || frame_len == NULL || frame_size < 12U) {
+        return false;
+    }
+
+    uint8_t to_radio[16];
+    size_t to_radio_len = 0;
+    if (!proto_put_varint_field(to_radio, sizeof(to_radio), &to_radio_len, 3, MESHTASTIC_CONFIG_ID) ||
+        to_radio_len + 4U > frame_size) {
+        return false;
+    }
+
+    frame[0] = MESHTASTIC_STREAM_START1;
+    frame[1] = MESHTASTIC_STREAM_START2;
+    frame[2] = (uint8_t)((to_radio_len >> 8U) & 0xffU);
+    frame[3] = (uint8_t)(to_radio_len & 0xffU);
+    memcpy(&frame[4], to_radio, to_radio_len);
+    *frame_len = to_radio_len + 4U;
+    return true;
+}
+
+static bool meshtastic_parse_data(const uint8_t *data, size_t data_len, uint32_t *portnum, char *text, size_t text_size)
+{
+    if (data == NULL || portnum == NULL || text == NULL || text_size == 0U) {
+        return false;
+    }
+
+    size_t offset = 0;
+    *portnum = 0;
+    text[0] = '\0';
+
+    while (offset < data_len) {
+        uint64_t key = 0;
+        if (!proto_read_varint(data, data_len, &offset, &key)) {
+            return false;
+        }
+        uint32_t field = (uint32_t)(key >> 3U);
+        uint8_t wire = (uint8_t)(key & 0x07U);
+        if (field == 1U && wire == 0U) {
+            uint64_t value = 0;
+            if (!proto_read_varint(data, data_len, &offset, &value)) {
+                return false;
+            }
+            *portnum = (uint32_t)value;
+        } else if (field == 2U && wire == 2U) {
+            uint64_t len = 0;
+            if (!proto_read_varint(data, data_len, &offset, &len) || offset + (size_t)len > data_len) {
+                return false;
+            }
+            size_t copy_len = (size_t)len;
+            if (copy_len >= text_size) {
+                copy_len = text_size - 1U;
+            }
+            memcpy(text, &data[offset], copy_len);
+            text[copy_len] = '\0';
+            for (size_t i = 0; i < copy_len; ++i) {
+                if ((uint8_t)text[i] < 32U && text[i] != '\t') {
+                    text[i] = ' ';
+                }
+            }
+            offset += (size_t)len;
+        } else if (!proto_skip_value(data, data_len, &offset, wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool meshtastic_parse_mesh_packet(const uint8_t *packet,
+                                         size_t packet_len,
+                                         uint32_t *from_node,
+                                         uint8_t *channel,
+                                         uint32_t *portnum,
+                                         char *text,
+                                         size_t text_size)
+{
+    if (packet == NULL || from_node == NULL || channel == NULL || portnum == NULL || text == NULL) {
+        return false;
+    }
+
+    size_t offset = 0;
+    *from_node = 0;
+    *channel = 0;
+    *portnum = 0;
+    text[0] = '\0';
+
+    while (offset < packet_len) {
+        uint64_t key = 0;
+        if (!proto_read_varint(packet, packet_len, &offset, &key)) {
+            return false;
+        }
+        uint32_t field = (uint32_t)(key >> 3U);
+        uint8_t wire = (uint8_t)(key & 0x07U);
+        if (field == 1U && wire == 5U) {
+            if (!proto_read_fixed32(packet, packet_len, &offset, from_node)) {
+                return false;
+            }
+        } else if (field == 3U && wire == 0U) {
+            uint64_t value = 0;
+            if (!proto_read_varint(packet, packet_len, &offset, &value)) {
+                return false;
+            }
+            *channel = (uint8_t)value;
+        } else if (field == 4U && wire == 2U) {
+            uint64_t len = 0;
+            if (!proto_read_varint(packet, packet_len, &offset, &len) || offset + (size_t)len > packet_len) {
+                return false;
+            }
+            if (!meshtastic_parse_data(&packet[offset], (size_t)len, portnum, text, text_size)) {
+                return false;
+            }
+            offset += (size_t)len;
+        } else if (!proto_skip_value(packet, packet_len, &offset, wire)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool meshtastic_parse_from_radio(const char *source, const uint8_t *payload, size_t payload_len)
+{
+    if (payload == NULL || payload_len == 0U) {
+        return false;
+    }
+
+    size_t offset = 0;
+    bool handled = false;
+    while (offset < payload_len) {
+        uint64_t key = 0;
+        if (!proto_read_varint(payload, payload_len, &offset, &key)) {
+            g_meshtastic_api_parse_errors++;
+            return false;
+        }
+        uint32_t field = (uint32_t)(key >> 3U);
+        uint8_t wire = (uint8_t)(key & 0x07U);
+        if (field == 2U && wire == 2U) {
+            uint64_t len = 0;
+            if (!proto_read_varint(payload, payload_len, &offset, &len) || offset + (size_t)len > payload_len) {
+                g_meshtastic_api_parse_errors++;
+                return false;
+            }
+
+            uint32_t from_node = 0;
+            uint32_t portnum = 0;
+            uint8_t channel = 0;
+            char text[TABFORGE_MESH_PREVIEW_LEN];
+            if (meshtastic_parse_mesh_packet(&payload[offset], (size_t)len, &from_node, &channel, &portnum, text, sizeof(text))) {
+                g_meshtastic_api_rx_frames++;
+                g_mesh_module_ready = true;
+                snprintf(g_mesh_last_transport, sizeof(g_mesh_last_transport), "%s api", mesh_transport_source_label(source));
+                if (portnum == MESHTASTIC_TEXT_MESSAGE_APP && text[0] != '\0') {
+                    char node_label[24];
+                    snprintf(node_label, sizeof(node_label), "!%08lx", (unsigned long)from_node);
+                    strlcpy(g_mesh_last_received, text, sizeof(g_mesh_last_received));
+                    g_mesh_received_count++;
+                    append_mesh_message("rx", mesh_channel_name_by_index(channel), node_label, text);
+                    handled = true;
+                }
+            } else {
+                g_meshtastic_api_parse_errors++;
+            }
+            offset += (size_t)len;
+        } else if (field == 3U || field == 4U || field == 10U || field == 13U) {
+            g_meshtastic_api_rx_frames++;
+            g_mesh_module_ready = true;
+            strlcpy(g_mesh_last_received, "Meshtastic status/config frame", sizeof(g_mesh_last_received));
+            snprintf(g_mesh_last_transport, sizeof(g_mesh_last_transport), "%s api", mesh_transport_source_label(source));
+            if (!proto_skip_value(payload, payload_len, &offset, wire)) {
+                g_meshtastic_api_parse_errors++;
+                return false;
+            }
+            handled = true;
+        } else if (!proto_skip_value(payload, payload_len, &offset, wire)) {
+            g_meshtastic_api_parse_errors++;
+            return false;
+        }
+    }
+
+    if (handled) {
+        request_active_app_refresh();
+    }
+    return handled;
+}
+
+static bool meshtastic_stream_ingest(meshtastic_rx_state_t *state,
+                                     const char *source,
+                                     const uint8_t *data,
+                                     size_t data_len)
+{
+    if (state == NULL || data == NULL || data_len == 0U) {
+        return false;
+    }
+
+    bool parsed = false;
+    for (size_t i = 0; i < data_len; ++i) {
+        uint8_t byte = data[i];
+        if (state->length == 0U) {
+            if (byte != MESHTASTIC_STREAM_START1) {
+                continue;
+            }
+            state->buffer[state->length++] = byte;
+            continue;
+        }
+
+        if (state->length == 1U && byte != MESHTASTIC_STREAM_START2) {
+            state->length = byte == MESHTASTIC_STREAM_START1 ? 1U : 0U;
+            continue;
+        }
+
+        if (state->length >= sizeof(state->buffer)) {
+            state->length = 0;
+            g_meshtastic_api_parse_errors++;
+            continue;
+        }
+        state->buffer[state->length++] = byte;
+
+        if (state->length == 4U) {
+            size_t payload_len = ((size_t)state->buffer[2] << 8U) | state->buffer[3];
+            if (payload_len == 0U || payload_len > MESHTASTIC_MAX_PROTO_LEN) {
+                state->length = 0;
+                g_meshtastic_api_parse_errors++;
+            }
+        } else if (state->length > 4U) {
+            size_t payload_len = ((size_t)state->buffer[2] << 8U) | state->buffer[3];
+            if (state->length >= payload_len + 4U) {
+                parsed |= meshtastic_parse_from_radio(source, &state->buffer[4], payload_len);
+                state->length = 0;
+            }
+        }
+    }
+    return parsed;
+}
+
 static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_len)
 {
+    meshtastic_rx_state_t *rx_state = NULL;
+    if (source != NULL && strcmp(source, "usb-cdc") == 0) {
+        rx_state = &g_meshtastic_usb_rx;
+    } else if (source != NULL && strcmp(source, "grove-uart") == 0) {
+        rx_state = &g_meshtastic_grove_rx;
+    }
+
+    if (!g_meshcore_mode && rx_state != NULL && meshtastic_stream_ingest(rx_state, source, data, data_len)) {
+        return;
+    }
+
     char preview[TABFORGE_MESH_PREVIEW_LEN];
     mesh_copy_preview_from_bytes(data, data_len, preview, sizeof(preview));
     strlcpy(g_mesh_last_received, preview, sizeof(g_mesh_last_received));
+    snprintf(g_mesh_last_transport, sizeof(g_mesh_last_transport), "%s raw", source != NULL ? source : "mesh");
     g_mesh_received_count++;
     g_mesh_module_ready = true;
     append_mesh_message("rx", selected_mesh_channel()->name, source != NULL ? source : "mesh", preview);
@@ -2954,6 +3451,70 @@ static void grove_uart_send_line(const char *line)
     ESP_LOGI(TABFORGE_TAG, "Grove UART TX: %s", line);
 }
 
+static bool grove_uart_send_bytes(const uint8_t *data, size_t data_len, const char *label)
+{
+    if (!g_grove_uart_ready || data == NULL || data_len == 0U) {
+        return false;
+    }
+
+    int written = uart_write_bytes(GROVE_UART_NUM, data, data_len);
+    if (written < 0 || (size_t)written != data_len) {
+        g_grove_uart_error = ESP_FAIL;
+        return false;
+    }
+
+    g_grove_tx_packets++;
+    g_grove_tx_bytes += (uint32_t)data_len;
+    g_grove_last_tx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    strlcpy(g_grove_last_tx, label != NULL ? label : "binary", sizeof(g_grove_last_tx));
+    append_event("grove_uart_binary_tx");
+    ESP_LOGI(TABFORGE_TAG, "Grove UART binary TX: %u bytes (%s)", (unsigned)data_len, label != NULL ? label : "frame");
+    return true;
+}
+
+static bool usb_cdc_send_bytes(const uint8_t *data, size_t data_len, const char *label)
+{
+    if (g_usb_cdc_handle == NULL || data == NULL || data_len == 0U) {
+        return false;
+    }
+
+    esp_err_t err = cdc_acm_host_data_tx_blocking(g_usb_cdc_handle, data, data_len, MESHTASTIC_TX_TIMEOUT_MS);
+    if (err != ESP_OK) {
+        g_usb_last_error = err;
+        ESP_LOGW(TABFORGE_TAG, "USB CDC TX failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    g_usb_tx_packets++;
+    g_usb_tx_bytes += (uint32_t)data_len;
+    g_usb_last_tx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    append_event("usb_cdc_tx");
+    ESP_LOGI(TABFORGE_TAG, "USB CDC TX: %u bytes (%s)", (unsigned)data_len, label != NULL ? label : "frame");
+    return true;
+}
+
+static bool meshtastic_send_config_request(void)
+{
+    uint8_t frame[MESHTASTIC_MAX_FRAME_LEN];
+    size_t frame_len = 0;
+    if (!meshtastic_build_config_request_frame(frame, sizeof(frame), &frame_len)) {
+        return false;
+    }
+
+    bool sent = false;
+    if (g_usb_state == USB_STATE_OPEN) {
+        sent |= usb_cdc_send_bytes(frame, frame_len, "meshtastic config");
+    }
+    if (g_grove_uart_ready) {
+        sent |= grove_uart_send_bytes(frame, frame_len, "meshtastic config");
+    }
+    if (sent) {
+        g_meshtastic_api_tx_frames++;
+        strlcpy(g_mesh_last_transport, "api config", sizeof(g_mesh_last_transport));
+    }
+    return sent;
+}
+
 static void mesh_send_text(const char *text, bool voice)
 {
     if (text == NULL || text[0] == '\0') {
@@ -2967,19 +3528,55 @@ static void mesh_send_text(const char *text, bool voice)
 
     const mesh_channel_t *channel = selected_mesh_channel();
     const mesh_node_t *node = selected_mesh_node();
-    char frame[256];
-    snprintf(frame,
-             sizeof(frame),
-             "{\"tabforge\":\"mesh.text\",\"profile\":\"%s\",\"channel\":%u,\"to\":\"%.32s\",\"gps\":%s,\"voice\":%s,\"text\":\"%.96s\"}",
-             selected_mesh_profile_name(),
-             (unsigned)channel->index,
-             node->node_id,
-             g_mesh_gps_share_enabled ? "true" : "false",
-             voice ? "true" : "false",
-             text);
-    grove_uart_send_line(frame);
+    bool sent = false;
+    char transport[32] = "none";
+
+    if (!g_meshcore_mode) {
+        uint8_t frame[MESHTASTIC_MAX_FRAME_LEN];
+        size_t frame_len = 0;
+        if (meshtastic_build_text_frame(text, channel, node, frame, sizeof(frame), &frame_len)) {
+            bool usb_sent = false;
+            bool grove_sent = false;
+            if (g_usb_state == USB_STATE_OPEN) {
+                usb_sent = usb_cdc_send_bytes(frame, frame_len, "meshtastic text");
+            }
+            if (g_grove_uart_ready) {
+                grove_sent = grove_uart_send_bytes(frame, frame_len, "meshtastic text");
+            }
+            sent = usb_sent || grove_sent;
+            if (sent) {
+                g_meshtastic_api_tx_frames++;
+                snprintf(transport, sizeof(transport), "%s%sapi",
+                         usb_sent ? "usb " : "",
+                         grove_sent ? "grove " : "");
+            }
+        }
+    }
+
+    if (!sent && g_grove_uart_ready) {
+        char frame[256];
+        snprintf(frame,
+                 sizeof(frame),
+                 "{\"tabforge\":\"mesh.text\",\"profile\":\"%s\",\"channel\":%u,\"to\":\"%.32s\",\"gps\":%s,\"voice\":%s,\"text\":\"%.96s\"}",
+                 selected_mesh_profile_name(),
+                 (unsigned)channel->index,
+                 node->node_id,
+                 g_mesh_gps_share_enabled ? "true" : "false",
+                 voice ? "true" : "false",
+                 text);
+        grove_uart_send_line(frame);
+        sent = true;
+        g_meshtastic_bridge_tx_lines++;
+        strlcpy(transport, "grove bridge", sizeof(transport));
+    }
+
+    if (!sent) {
+        set_activity("Mesh Message", "No USB CDC or Grove mesh transport is ready.");
+        return;
+    }
 
     strlcpy(g_mesh_last_sent, text, sizeof(g_mesh_last_sent));
+    strlcpy(g_mesh_last_transport, transport, sizeof(g_mesh_last_transport));
     g_mesh_sent_count++;
     if (voice) {
         g_mesh_voice_count++;
@@ -3342,8 +3939,13 @@ static void grove_meshtastic_ping_button_event_cb(lv_event_t *event)
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
         return;
     }
-    grove_uart_send_line("TabForge Meshtastic ping");
-    set_activity("Meshtastic Ping", g_grove_uart_ready ? "Sent over Grove UART." : "Grove UART is not ready.");
+    bool api_sent = meshtastic_send_config_request();
+    if (g_grove_uart_ready) {
+        grove_uart_send_line("TabForge Meshtastic ping");
+        g_meshtastic_bridge_tx_lines++;
+    }
+    set_activity("Meshtastic Ping", api_sent ? "API config probe sent." : "Sent Grove text probe if UART is ready.");
+    request_active_app_refresh();
 }
 
 static void grove_meshcore_help_button_event_cb(lv_event_t *event)
@@ -3374,10 +3976,19 @@ static void mesh_probe_button_event_cb(lv_event_t *event)
         set_accessory_power(true);
         start_accessory_probe_tasks();
     }
-    const char *probe = g_meshcore_mode ? "help" : "TabForge Meshtastic link test";
-    grove_uart_send_line(probe);
-    set_activity("Mesh Probe", probe);
+    if (g_meshcore_mode) {
+        grove_uart_send_line("help");
+        set_activity("Mesh Probe", "MeshCore help sent over Grove.");
+    } else {
+        bool api_sent = meshtastic_send_config_request();
+        if (g_grove_uart_ready) {
+            grove_uart_send_line("TabForge Meshtastic link test");
+            g_meshtastic_bridge_tx_lines++;
+        }
+        set_activity("Mesh Probe", api_sent ? "Meshtastic API config probe sent." : "Grove text probe sent if UART is ready.");
+    }
     append_event("mesh_probe_sent");
+    request_active_app_refresh();
 }
 
 static void mode_button_event_cb(lv_event_t *event)
@@ -3394,7 +4005,11 @@ static void mode_button_event_cb(lv_event_t *event)
         set_activity("Mesh profile", selected_mesh_profile_name());
     }
     append_event(g_meshcore_mode ? "mode_meshcore" : "mode_meshtastic");
-    grove_uart_send_line(g_meshcore_mode ? "help" : "TabForge Meshtastic link test");
+    if (g_meshcore_mode) {
+        grove_uart_send_line("help");
+    } else {
+        (void)meshtastic_send_config_request();
+    }
     ESP_LOGI(TABFORGE_TAG, "mesh profile switched to %s", selected_mesh_profile_name());
 }
 
@@ -3822,13 +4437,24 @@ static void render_mesh_messenger_locked(lv_obj_t *card, lv_coord_t width, bool 
 
     snprintf(line,
              sizeof(line),
-             "TX %lu RX %lu | Grove rx/tx %lu/%lu | USB rx %lu",
+             "TX %lu RX %lu | API %lu/%lu err %lu | %s",
              (unsigned long)g_mesh_sent_count,
              (unsigned long)g_mesh_received_count,
+             (unsigned long)g_meshtastic_api_tx_frames,
+             (unsigned long)g_meshtastic_api_rx_frames,
+             (unsigned long)g_meshtastic_api_parse_errors,
+             g_mesh_last_transport);
+    add_app_status_line(card, "Link", line, width, 0x61d5f0);
+
+    snprintf(line,
+             sizeof(line),
+             "Grove rx/tx %lu/%lu | USB rx/tx %lu/%lu | bridge %lu",
              (unsigned long)g_grove_rx_packets,
              (unsigned long)g_grove_tx_packets,
-             (unsigned long)g_usb_rx_packets);
-    add_app_status_line(card, "Link", line, width, 0x61d5f0);
+             (unsigned long)g_usb_rx_packets,
+             (unsigned long)g_usb_tx_packets,
+             (unsigned long)g_meshtastic_bridge_tx_lines);
+    add_app_status_line(card, "I/O", line, width, 0x93a6ad);
 
     snprintf(line,
              sizeof(line),
