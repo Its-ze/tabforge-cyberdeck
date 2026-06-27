@@ -1456,8 +1456,9 @@ static void start_accessory_probe_tasks(void)
         return;
     }
     g_accessory_probe_started = true;
+    init_ir_probe();
     init_grove_uart_probe();
-    ESP_LOGI(TABFORGE_TAG, "C6L Grove UART link armed for Meshtastic/MeshCore switching");
+    ESP_LOGI(TABFORGE_TAG, "IR probe and C6L Grove UART link armed");
 }
 
 static void refresh_live_stats_locked(void)
@@ -1543,10 +1544,18 @@ static void refresh_live_stats_locked(void)
     if (g_ui.usb_label != NULL) {
         if (!g_usb_power_ready) {
             lv_label_set_text_fmt(g_ui.usb_label, "USB-A 5V %s", esp_err_to_name(g_usb_power_error));
+        } else if (g_usb_state == USB_STATE_OPEN) {
+            uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+            uint64_t age_ms = g_usb_last_rx_ms > 0 ? now_ms - g_usb_last_rx_ms : 0;
+            lv_label_set_text_fmt(g_ui.usb_label,
+                                  "open %lu | %luB | %llums",
+                                  (unsigned long)g_usb_open_count,
+                                  (unsigned long)g_usb_rx_bytes,
+                                  (unsigned long long)age_ms);
         } else if (g_usb_last_error != ESP_OK) {
-            lv_label_set_text_fmt(g_ui.usb_label, "USB-A %s", esp_err_to_name(g_usb_last_error));
+            lv_label_set_text_fmt(g_ui.usb_label, "%s | %s", usb_state_text(), esp_err_to_name(g_usb_last_error));
         } else {
-            lv_label_set_text(g_ui.usb_label, "USB-A power on");
+            lv_label_set_text_fmt(g_ui.usb_label, "%s", usb_state_text());
         }
     }
 
@@ -1889,6 +1898,99 @@ static esp_err_t http_get_to_buffer(const char *url, char *buffer, size_t buffer
     return (status >= 200 && status < 300) ? ESP_OK : ESP_FAIL;
 }
 
+static int hex_value(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool parse_sha256_hex(const char *hex, uint8_t digest[32])
+{
+    if (hex == NULL || strlen(hex) != 64U) {
+        return false;
+    }
+
+    for (size_t i = 0; i < 32U; ++i) {
+        int high = hex_value(hex[i * 2U]);
+        int low = hex_value(hex[(i * 2U) + 1U]);
+        if (high < 0 || low < 0) {
+            return false;
+        }
+        digest[i] = (uint8_t)((high << 4) | low);
+    }
+    return true;
+}
+
+static void digest_to_hex(const uint8_t digest[32], char *buffer, size_t buffer_size)
+{
+    static const char k_hex[] = "0123456789abcdef";
+    if (buffer == NULL || buffer_size < 65U) {
+        return;
+    }
+
+    for (size_t i = 0; i < 32U; ++i) {
+        buffer[i * 2U] = k_hex[(digest[i] >> 4) & 0x0f];
+        buffer[(i * 2U) + 1U] = k_hex[digest[i] & 0x0f];
+    }
+    buffer[64] = '\0';
+}
+
+static bool parse_version_triplet(const char *version, int out[3])
+{
+    if (version == NULL || out == NULL) {
+        return false;
+    }
+
+    const char *cursor = version;
+    if (*cursor == 'v' || *cursor == 'V') {
+        cursor++;
+    }
+
+    for (int part = 0; part < 3; ++part) {
+        if (*cursor < '0' || *cursor > '9') {
+            return false;
+        }
+        int value = 0;
+        while (*cursor >= '0' && *cursor <= '9') {
+            value = (value * 10) + (*cursor - '0');
+            cursor++;
+        }
+        out[part] = value;
+        if (part < 2) {
+            if (*cursor != '.') {
+                return false;
+            }
+            cursor++;
+        }
+    }
+
+    return true;
+}
+
+static int compare_versions(const char *left, const char *right)
+{
+    int left_parts[3] = {0};
+    int right_parts[3] = {0};
+    if (!parse_version_triplet(left, left_parts) || !parse_version_triplet(right, right_parts)) {
+        return strcmp(left != NULL ? left : "", right != NULL ? right : "");
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        if (left_parts[i] != right_parts[i]) {
+            return left_parts[i] > right_parts[i] ? 1 : -1;
+        }
+    }
+    return 0;
+}
+
 static esp_err_t fetch_manifest_firmware_url(void)
 {
     char *manifest = heap_caps_malloc(TABFORGE_OTA_MANIFEST_MAX_BYTES, MALLOC_CAP_INTERNAL);
@@ -1913,6 +2015,8 @@ static esp_err_t fetch_manifest_firmware_url(void)
     cJSON *firmware = cJSON_IsObject(latest) ? cJSON_GetObjectItemCaseSensitive(latest, "firmware") : NULL;
     cJSON *available = cJSON_IsObject(firmware) ? cJSON_GetObjectItemCaseSensitive(firmware, "available") : NULL;
     cJSON *url = cJSON_IsObject(firmware) ? cJSON_GetObjectItemCaseSensitive(firmware, "url") : NULL;
+    cJSON *sha256 = cJSON_IsObject(firmware) ? cJSON_GetObjectItemCaseSensitive(firmware, "sha256") : NULL;
+    cJSON *size = cJSON_IsObject(firmware) ? cJSON_GetObjectItemCaseSensitive(firmware, "size") : NULL;
 
     if (cJSON_IsString(version) && version->valuestring != NULL) {
         strlcpy(g_ota_version, version->valuestring, sizeof(g_ota_version));
@@ -1921,9 +2025,128 @@ static esp_err_t fetch_manifest_firmware_url(void)
         cJSON_Delete(root);
         return ESP_ERR_NOT_FOUND;
     }
+    if (g_ota_version[0] == '\0' || compare_versions(g_ota_version, TABFORGE_VERSION) <= 0) {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!cJSON_IsString(sha256) || sha256->valuestring == NULL || !parse_sha256_hex(sha256->valuestring, (uint8_t[32]){0})) {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
     strlcpy(g_ota_firmware_url, url->valuestring, sizeof(g_ota_firmware_url));
+    strlcpy(g_ota_sha256, sha256->valuestring, sizeof(g_ota_sha256));
+    g_ota_size = cJSON_IsNumber(size) && size->valuedouble > 0 ? (uint32_t)size->valuedouble : 0U;
     cJSON_Delete(root);
     return ESP_OK;
+}
+
+static esp_err_t download_and_apply_verified_ota(void)
+{
+    uint8_t expected_digest[32];
+    if (!parse_sha256_hex(g_ota_sha256, expected_digest)) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if (update_partition == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    esp_http_client_config_t http_config = {
+        .url = g_ota_firmware_url,
+        .timeout_ms = 30000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .keep_alive_enable = true,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&http_config);
+    if (client == NULL) {
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        esp_http_client_cleanup(client);
+        return err;
+    }
+
+    int content_length = esp_http_client_fetch_headers(client);
+    if (content_length > 0 && g_ota_size > 0U && (uint32_t)content_length != g_ota_size) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    esp_ota_handle_t ota_handle = 0;
+    err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
+    if (err != ESP_OK) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return err;
+    }
+
+    uint8_t *buffer = heap_caps_malloc(TABFORGE_OTA_HTTP_CHUNK_SIZE, MALLOC_CAP_INTERNAL);
+    if (buffer == NULL) {
+        esp_ota_abort(ota_handle);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_NO_MEM;
+    }
+
+    mbedtls_sha256_context sha_context;
+    mbedtls_sha256_init(&sha_context);
+    mbedtls_sha256_starts(&sha_context, 0);
+
+    uint32_t total = 0;
+    while (true) {
+        int read_len = esp_http_client_read(client, (char *)buffer, TABFORGE_OTA_HTTP_CHUNK_SIZE);
+        if (read_len < 0) {
+            err = ESP_FAIL;
+            break;
+        }
+        if (read_len == 0) {
+            break;
+        }
+
+        err = esp_ota_write(ota_handle, buffer, (size_t)read_len);
+        if (err != ESP_OK) {
+            break;
+        }
+        mbedtls_sha256_update(&sha_context, buffer, (size_t)read_len);
+        total += (uint32_t)read_len;
+    }
+
+    uint8_t actual_digest[32];
+    mbedtls_sha256_finish(&sha_context, actual_digest);
+    mbedtls_sha256_free(&sha_context);
+    heap_caps_free(buffer);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (err == ESP_OK && g_ota_size > 0U && total != g_ota_size) {
+        err = ESP_ERR_INVALID_RESPONSE;
+    }
+    if (err == ESP_OK && memcmp(actual_digest, expected_digest, sizeof(actual_digest)) != 0) {
+        char actual_hex[65];
+        digest_to_hex(actual_digest, actual_hex, sizeof(actual_hex));
+        ESP_LOGW(TABFORGE_TAG, "OTA SHA256 mismatch expected=%s actual=%s", g_ota_sha256, actual_hex);
+        err = ESP_ERR_INVALID_RESPONSE;
+    }
+
+    if (err != ESP_OK) {
+        esp_ota_abort(ota_handle);
+        return err;
+    }
+
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err == ESP_OK) {
+        ESP_LOGI(TABFORGE_TAG, "OTA verified %lu bytes sha256=%s", (unsigned long)total, g_ota_sha256);
+    }
+    return err;
 }
 
 static void ota_update_task(void *arg)
@@ -1944,23 +2167,15 @@ static void ota_update_task(void *arg)
     if (err != ESP_OK) {
         g_ota_state = OTA_STATE_ERROR;
         g_ota_last_error = err;
-        update_activity_from_task("OTA Manifest", esp_err_to_name(err));
+        update_activity_from_task("OTA Manifest",
+                                  err == ESP_ERR_INVALID_STATE ? "No newer firmware in manifest." : esp_err_to_name(err));
         vTaskDelete(NULL);
         return;
     }
 
     g_ota_state = OTA_STATE_DOWNLOADING;
     update_activity_from_task("OTA Download", g_ota_version[0] != '\0' ? g_ota_version : g_ota_firmware_url);
-    esp_http_client_config_t http_config = {
-        .url = g_ota_firmware_url,
-        .timeout_ms = 30000,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .keep_alive_enable = true,
-    };
-    esp_https_ota_config_t ota_config = {
-        .http_config = &http_config,
-    };
-    err = esp_https_ota(&ota_config);
+    err = download_and_apply_verified_ota();
     if (err == ESP_OK) {
         g_ota_state = OTA_STATE_READY_REBOOT;
         g_ota_reboot_pending = true;
@@ -2065,6 +2280,22 @@ static void grove_uart_send_line(const char *line)
     uart_write_bytes(GROVE_UART_NUM, "\n", 1);
     append_event("grove_uart_tx");
     ESP_LOGI(TABFORGE_TAG, "Grove UART TX: %s", line);
+}
+
+static void mesh_probe_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    if (!g_ext_power_ready) {
+        set_accessory_power(true);
+        start_accessory_probe_tasks();
+    }
+    const char *probe = g_meshcore_mode ? "help" : "TabForge Meshtastic link test";
+    grove_uart_send_line(probe);
+    set_activity("Mesh Probe", probe);
+    append_event("mesh_probe_sent");
 }
 
 static void mode_button_event_cb(lv_event_t *event)
@@ -2440,6 +2671,247 @@ static void build_update_page(lv_obj_t *page, lv_coord_t width, lv_coord_t heigh
     lv_obj_add_flag(g_ui.wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
 }
 
+static const feature_tile_t *find_tile_by_app(app_id_t app_id)
+{
+    for (size_t i = 0; i < sizeof(g_tiles) / sizeof(g_tiles[0]); ++i) {
+        if (g_tiles[i].app_id == app_id) {
+            return &g_tiles[i];
+        }
+    }
+    return NULL;
+}
+
+static void add_app_status_line(lv_obj_t *parent,
+                                const char *title,
+                                const char *value,
+                                lv_coord_t width,
+                                uint32_t accent)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text_fmt(label, "%s: %s", title, value);
+    lv_obj_set_width(label, width);
+    lv_obj_set_style_text_color(label, color_hex(accent), 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+}
+
+static void add_app_actions(lv_obj_t *parent,
+                            lv_coord_t width,
+                            bool landscape,
+                            app_id_t app_id)
+{
+    lv_obj_t *actions = lv_obj_create(parent);
+    lv_obj_remove_style_all(actions);
+    lv_obj_set_size(actions, width, landscape ? 112 : 236);
+    lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(actions, 10, 0);
+    lv_obj_set_style_pad_column(actions, 10, 0);
+
+    lv_coord_t columns = landscape ? 3 : 2;
+    lv_coord_t button_w = (width - ((columns - 1) * 10)) / columns;
+    if (!landscape && button_w < 120) {
+        columns = 1;
+        button_w = width;
+    }
+
+    make_button(actions, button_w, "Back", back_to_apps_button_event_cb);
+
+    switch (app_id) {
+    case APP_WIFI:
+        make_button(actions, button_w, "Scan", wifi_scan_button_event_cb);
+        make_button(actions, button_w, "Next AP", wifi_next_button_event_cb);
+        make_button(actions, button_w, "Connect", wifi_connect_button_event_cb);
+        make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
+        break;
+    case APP_MESSAGES:
+        make_button(actions, button_w, "Send Test", mesh_probe_button_event_cb);
+        make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
+        make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
+        break;
+    case APP_MESHCORE:
+        make_button(actions, button_w, "Switch Mode", mode_button_event_cb);
+        make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
+        make_button(actions, button_w, "Send Help", mesh_probe_button_event_cb);
+        break;
+    case APP_TDECK:
+        make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
+        make_button(actions, button_w, "Mesh Mode", mode_button_event_cb);
+        make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
+        break;
+    case APP_IR:
+        make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
+        make_button(actions, button_w, "Settings", settings_button_event_cb);
+        break;
+    case APP_RECORDER:
+        make_button(actions, button_w, "Sleep", sleep_button_event_cb);
+        make_button(actions, button_w, "Settings", settings_button_event_cb);
+        break;
+    case APP_USB:
+        make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
+        make_button(actions, button_w, "Mesh Mode", mode_button_event_cb);
+        break;
+    case APP_FILES:
+        make_button(actions, button_w, "Settings", settings_button_event_cb);
+        make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
+        break;
+    case APP_UPDATE:
+        make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
+        make_button(actions, button_w, "Run OTA", ota_start_button_event_cb);
+        make_button(actions, button_w, "Reboot OTA", ota_reboot_button_event_cb);
+        break;
+    case APP_NONE:
+    default:
+        make_button(actions, button_w, "Settings", settings_button_event_cb);
+        break;
+    }
+}
+
+static void render_active_app_page_locked(void)
+{
+    if (g_ui.page_app == NULL) {
+        return;
+    }
+
+    lv_obj_clean(g_ui.page_app);
+    lv_coord_t width = lv_obj_get_width(g_ui.page_app);
+    lv_coord_t height = lv_obj_get_height(g_ui.page_app);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    bool landscape = is_landscape_rotation(g_rotation);
+    const feature_tile_t *tile = find_tile_by_app(g_active_app);
+    if (tile == NULL) {
+        tile = &g_tiles[0];
+        g_active_app = tile->app_id;
+    }
+
+    lv_obj_t *card = make_panel(g_ui.page_app, width, height, 0x10161a, tile->accent);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(card, 8, 0);
+
+    lv_obj_t *title = make_text(card, tile->name, tile->accent, width - 32);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    make_text(card, tile->summary, 0xf1f7f3, width - 32);
+
+    char line_a[128];
+    char line_b[128];
+    char line_c[128];
+    char battery_status[32];
+    char screen_status[48];
+    format_battery_status(battery_status, sizeof(battery_status), false);
+    format_screen_status(screen_status, sizeof(screen_status));
+
+    switch (g_active_app) {
+    case APP_WIFI:
+        format_wifi_status(line_a, sizeof(line_a));
+        format_wifi_scan_status(line_b, sizeof(line_b));
+        snprintf(line_c, sizeof(line_c), "OTA %s | %s", ota_state_text(), g_ota_version[0] ? g_ota_version : "manifest");
+        add_app_status_line(card, "Network", line_a, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Scan", line_b, width - 32, 0x93a6ad);
+        add_app_status_line(card, "Update", line_c, width - 32, 0xffc857);
+        break;
+    case APP_MESSAGES:
+        snprintf(line_a, sizeof(line_a), "%s | %s", active_mode_name(), active_mode_detail());
+        snprintf(line_b, sizeof(line_b), "Grove RX %lu packets / %lu bytes",
+                 (unsigned long)g_grove_rx_packets,
+                 (unsigned long)g_grove_rx_bytes);
+        snprintf(line_c, sizeof(line_c), "USB %s | radio %s", usb_state_text(), g_mesh_module_ready ? "heard" : "waiting");
+        add_app_status_line(card, "Mode", line_a, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "C6L", line_b, width - 32, 0x43d17a);
+        add_app_status_line(card, "Link", line_c, width - 32, 0x93a6ad);
+        break;
+    case APP_MESHCORE:
+        snprintf(line_a, sizeof(line_a), "Selected %s", selected_mesh_profile_name());
+        snprintf(line_b, sizeof(line_b), "Grove %s | USB %s",
+                 g_grove_uart_ready ? "ready" : "pending",
+                 usb_state_text());
+        snprintf(line_c, sizeof(line_c), "Use Switch Mode to flip profiles and send a serial probe.");
+        add_app_status_line(card, "Profile", line_a, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Transport", line_b, width - 32, 0x61d5f0);
+        add_app_status_line(card, "Action", line_c, width - 32, 0x93a6ad);
+        break;
+    case APP_TDECK:
+        snprintf(line_a, sizeof(line_a), "USB %s | opens %lu | disconnects %lu",
+                 usb_state_text(),
+                 (unsigned long)g_usb_open_count,
+                 (unsigned long)g_usb_disconnect_count);
+        snprintf(line_b, sizeof(line_b), "RX %lu packets / %lu bytes",
+                 (unsigned long)g_usb_rx_packets,
+                 (unsigned long)g_usb_rx_bytes);
+        snprintf(line_c, sizeof(line_c), "T-Deck companion profile stays on USB CDC.");
+        add_app_status_line(card, "Bridge", line_a, width - 32, 0xf0bf4f);
+        add_app_status_line(card, "Serial", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Profile", line_c, width - 32, 0x93a6ad);
+        break;
+    case APP_IR:
+        snprintf(line_a, sizeof(line_a), "IR %s | level %d | edges %lu",
+                 g_ir_probe_ready ? "ready" : "pending",
+                 g_ir_level,
+                 (unsigned long)g_ir_edges);
+        snprintf(line_b, sizeof(line_b), "Grove RX GPIO%u TX GPIO%u",
+                 (unsigned)TABFORGE_IR_RX_GPIO,
+                 (unsigned)TABFORGE_IR_TX_GPIO);
+        snprintf(line_c, sizeof(line_c), "Event log: %s", g_sd_ready ? "enabled" : "SD missing");
+        add_app_status_line(card, "Receiver", line_a, width - 32, 0xff7a66);
+        add_app_status_line(card, "Pins", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Storage", line_c, width - 32, 0x93a6ad);
+        break;
+    case APP_RECORDER:
+        snprintf(line_a, sizeof(line_a), "%s | avg %d | peak %d", mic_state_text(), g_mic_average, g_mic_peak);
+        snprintf(line_b, sizeof(line_b), "reads %lu | clips path /tabforge/audio", (unsigned long)g_mic_reads);
+        snprintf(line_c, sizeof(line_c), "Screen %s | battery %s", screen_status, battery_status);
+        add_app_status_line(card, "Mic", line_a, width - 32, 0xb982ff);
+        add_app_status_line(card, "Capture", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Power", line_c, width - 32, 0x93a6ad);
+        break;
+    case APP_USB:
+        snprintf(line_a, sizeof(line_a), "USB-A 5V %s | host %s",
+                 g_usb_power_ready ? "on" : "off",
+                 g_usb_host_ready ? "ready" : "waiting");
+        snprintf(line_b, sizeof(line_b), "%s | RX %lu packets / %lu bytes",
+                 usb_state_text(),
+                 (unsigned long)g_usb_rx_packets,
+                 (unsigned long)g_usb_rx_bytes);
+        snprintf(line_c, sizeof(line_c), "Last error %s", esp_err_to_name(g_usb_last_error));
+        add_app_status_line(card, "Power", line_a, width - 32, 0x70a7ff);
+        add_app_status_line(card, "CDC", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Driver", line_c, width - 32, 0x93a6ad);
+        break;
+    case APP_FILES:
+        snprintf(line_a, sizeof(line_a), "SD %s | %s",
+                 g_sd_ready ? (g_sd_recovered ? "recovered" : "mounted") : "missing",
+                 g_sd_ready ? TABFORGE_SD_ROOT : esp_err_to_name(g_sd_last_error));
+        snprintf(line_b, sizeof(line_b), "Config /tabforge/config.json");
+        snprintf(line_c, sizeof(line_c), "Logs, audio, IR, and backups stay on SD.");
+        add_app_status_line(card, "Card", line_a, width - 32, 0x77dd88);
+        add_app_status_line(card, "Config", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Paths", line_c, width - 32, 0x93a6ad);
+        break;
+    case APP_UPDATE:
+        snprintf(line_a, sizeof(line_a), "%s | manifest %s", ota_state_text(), g_ota_manifest_url);
+        snprintf(line_b, sizeof(line_b), "remote %s | running %s",
+                 g_ota_version[0] ? g_ota_version : "unknown",
+                 TABFORGE_VERSION);
+        snprintf(line_c, sizeof(line_c), "hash %s", g_ota_sha256[0] ? g_ota_sha256 : "not fetched");
+        add_app_status_line(card, "OTA", line_a, width - 32, 0xffc857);
+        add_app_status_line(card, "Version", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "SHA256", line_c, width - 32, 0x93a6ad);
+        break;
+    case APP_NONE:
+    default:
+        add_app_status_line(card, "Launcher", "Choose an app from Home.", width - 32, 0xf1f7f3);
+        break;
+    }
+
+    add_app_actions(card, width - 32, landscape, g_active_app);
+    set_activity(tile->name, tile->summary);
+}
+
 static void build_pages(lv_obj_t *parent, lv_coord_t width, lv_coord_t height, bool landscape)
 {
     lv_obj_t *pages = lv_obj_create(parent);
@@ -2450,10 +2922,12 @@ static void build_pages(lv_obj_t *parent, lv_coord_t width, lv_coord_t height, b
     g_ui.page_apps = make_page(pages, width, height);
     g_ui.page_settings = make_page(pages, width, height);
     g_ui.page_update = make_page(pages, width, height);
+    g_ui.page_app = make_page(pages, width, height);
 
     build_app_grid(g_ui.page_apps, width, height, landscape);
     build_settings_page(g_ui.page_settings, width, height, landscape);
     build_update_page(g_ui.page_update, width, height, landscape);
+    render_active_app_page_locked();
 }
 
 static void build_body(lv_obj_t *screen, lv_coord_t width, lv_coord_t height, bool landscape)
@@ -2924,6 +3398,46 @@ static void init_grove_uart_probe(void)
     }
 }
 
+static bool usb_cdc_rx_cb(const uint8_t *data, size_t data_len, void *user_arg)
+{
+    (void)data;
+    (void)user_arg;
+
+    g_usb_rx_packets++;
+    g_usb_rx_bytes += (uint32_t)data_len;
+    g_usb_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    g_mesh_module_ready = true;
+    return true;
+}
+
+static void usb_cdc_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_ctx)
+{
+    (void)user_ctx;
+    if (event == NULL) {
+        return;
+    }
+
+    switch (event->type) {
+    case CDC_ACM_HOST_ERROR:
+        g_usb_last_error = event->data.error;
+        g_usb_state = USB_STATE_ERROR;
+        ESP_LOGW(TABFORGE_TAG, "USB CDC error: %s", esp_err_to_name(g_usb_last_error));
+        break;
+    case CDC_ACM_HOST_DEVICE_DISCONNECTED:
+        g_usb_cdc_disconnected = true;
+        g_usb_disconnect_count++;
+        g_usb_state = USB_STATE_DISCONNECTED;
+        ESP_LOGI(TABFORGE_TAG, "USB CDC device disconnected");
+        break;
+    case CDC_ACM_HOST_SERIAL_STATE:
+        ESP_LOGI(TABFORGE_TAG, "USB CDC serial state: 0x%04x", event->data.serial_state.val);
+        break;
+    case CDC_ACM_HOST_NETWORK_CONNECTION:
+    default:
+        break;
+    }
+}
+
 static void mic_monitor_task(void *arg)
 {
     (void)arg;
@@ -3027,6 +3541,110 @@ static void poll_grove_uart(void)
     }
 }
 
+static void poll_ir_probe(void)
+{
+    if (!g_ir_probe_ready) {
+        return;
+    }
+
+    int level = gpio_get_level(TABFORGE_IR_RX_GPIO);
+    if (g_ir_level >= 0 && level != g_ir_level) {
+        g_ir_edges++;
+    }
+    g_ir_level = level;
+}
+
+static void usb_cdc_task(void *arg)
+{
+    (void)arg;
+
+    while (!g_usb_power_ready) {
+        g_usb_state = USB_STATE_OFF;
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    g_usb_state = USB_STATE_POWERED;
+    esp_err_t err = bsp_usb_host_start(BSP_USB_HOST_POWER_MODE_USB_DEV, true);
+    if (err != ESP_OK) {
+        g_usb_last_error = err;
+        g_usb_state = USB_STATE_ERROR;
+        ESP_LOGW(TABFORGE_TAG, "USB host start failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    g_usb_host_ready = true;
+    append_event("usb_host_started");
+    ESP_LOGI(TABFORGE_TAG, "USB host power/library started");
+
+    err = cdc_acm_host_install(NULL);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        g_usb_last_error = err;
+        g_usb_state = USB_STATE_ERROR;
+        ESP_LOGW(TABFORGE_TAG, "USB CDC host install failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    const cdc_acm_line_coding_t line_coding = {
+        .dwDTERate = USB_CDC_BAUDRATE,
+        .bCharFormat = 0,
+        .bParityType = 0,
+        .bDataBits = 8,
+    };
+
+    while (true) {
+        if (!g_usb_power_ready) {
+            if (g_usb_cdc_handle != NULL) {
+                cdc_acm_host_close(g_usb_cdc_handle);
+                g_usb_cdc_handle = NULL;
+            }
+            g_usb_state = USB_STATE_OFF;
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
+        if (g_usb_cdc_handle != NULL) {
+            if (g_usb_cdc_disconnected) {
+                cdc_acm_host_close(g_usb_cdc_handle);
+                g_usb_cdc_handle = NULL;
+                g_usb_cdc_disconnected = false;
+                g_usb_state = USB_STATE_SCANNING;
+            }
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
+        g_usb_state = USB_STATE_SCANNING;
+        cdc_acm_host_device_config_t dev_config = {
+            .connection_timeout_ms = USB_CDC_SCAN_TIMEOUT_MS,
+            .out_buffer_size = 512,
+            .in_buffer_size = 512,
+            .event_cb = usb_cdc_event_cb,
+            .data_cb = usb_cdc_rx_cb,
+            .user_arg = NULL,
+        };
+
+        err = cdc_acm_host_open(CDC_HOST_ANY_VID, CDC_HOST_ANY_PID, 0, &dev_config, &g_usb_cdc_handle);
+        if (err == ESP_OK) {
+            g_usb_state = USB_STATE_OPEN;
+            g_usb_last_error = ESP_OK;
+            g_usb_open_count++;
+            cdc_acm_host_line_coding_set(g_usb_cdc_handle, &line_coding);
+            cdc_acm_host_set_control_line_state(g_usb_cdc_handle, true, true);
+            cdc_acm_host_desc_print(g_usb_cdc_handle);
+            append_event("usb_cdc_open");
+            ESP_LOGI(TABFORGE_TAG, "USB CDC device opened at %u baud", (unsigned)USB_CDC_BAUDRATE);
+        } else {
+            g_usb_last_error = err;
+            if (err != ESP_ERR_NOT_FOUND && err != ESP_ERR_TIMEOUT) {
+                ESP_LOGW(TABFORGE_TAG, "USB CDC open failed: %s", esp_err_to_name(err));
+            }
+            vTaskDelay(pdMS_TO_TICKS(1200));
+        }
+    }
+}
+
 static void accessory_auto_power_task(void *arg)
 {
     (void)arg;
@@ -3061,6 +3679,7 @@ static void rotation_task(void *arg)
 
     while (true) {
         poll_grove_uart();
+        poll_ir_probe();
         if (bsp_display_lock(100)) {
             maybe_apply_auto_rotation_locked();
             bsp_display_unlock();
@@ -3130,6 +3749,7 @@ void app_main(void)
     xTaskCreate(heartbeat_task, "tabforge-heartbeat", 4096, NULL, 5, NULL);
     xTaskCreate(mic_monitor_task, "tabforge-mic-monitor", 6144, NULL, 4, NULL);
     xTaskCreate(accessory_auto_power_task, "tabforge-accessory-power", 3072, NULL, 4, NULL);
+    xTaskCreate(usb_cdc_task, "tabforge-usb-cdc", 8192, NULL, 6, NULL);
     xTaskCreate(stats_task, "tabforge-stats", 6144, NULL, 4, NULL);
     xTaskCreate(rotation_task, "tabforge-rotate", 4096, NULL, 4, NULL);
 }
