@@ -2,18 +2,18 @@
     "schema":  "tabforge.ota-manifest.v0",
     "project":  "tabforge-cyberdeck",
     "channel":  "stable",
-    "generatedAt":  "2026-06-27T04:33:46Z",
+    "generatedAt":  "2026-06-27T16:59:15Z",
     "latest":  {
-                   "version":  "0.1.16",
-                   "name":  "TabForge Cyberdeck 0.1.16",
+                   "version":  "0.1.17",
+                   "name":  "TabForge Cyberdeck 0.1.17",
                    "target":  "tab5-esp32p4",
                    "status":  "firmware",
                    "releaseNotesUrl":  "https://its-ze.github.io/tabforge-cyberdeck/",
                    "firmware":  {
                                     "available":  true,
-                                    "url":  "https://its-ze.github.io/tabforge-cyberdeck/firmware/tabforge-tab5-0.1.16.bin",
-                                    "sha256":  "8af92c7dd07ea9bc337a9a5e8cbcd8c5a4905d4280546eb32e78226b8175844d",
-                                    "size":  1800336
+                                    "url":  "https://its-ze.github.io/tabforge-cyberdeck/firmware/tabforge-tab5-0.1.17.bin",
+                                    "sha256":  "c95f5e8a6369de3c35800de52fa4743c94d3e251fb672d973a8834cfb2d5a366",
+                                    "size":  1800512
                                 }
                },
     "companionProfiles":  [
