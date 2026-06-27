@@ -3595,12 +3595,17 @@ static void init_ir_probe(void)
     }
 
     gpio_set_level(TABFORGE_IR_TX_GPIO, 0);
-    err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TABFORGE_TAG, "IR RX ISR service install failed: %s", esp_err_to_name(err));
-    } else if (!g_ir_isr_attached) {
+    if (!g_ir_isr_attached) {
         err = gpio_isr_handler_add(TABFORGE_IR_RX_GPIO, ir_rx_edge_isr, NULL);
-        if (err == ESP_OK) {
+        if (err == ESP_ERR_INVALID_STATE) {
+            esp_err_t service_err = gpio_install_isr_service(0);
+            if (service_err == ESP_OK || service_err == ESP_ERR_INVALID_STATE) {
+                err = gpio_isr_handler_add(TABFORGE_IR_RX_GPIO, ir_rx_edge_isr, NULL);
+            } else {
+                err = service_err;
+            }
+        }
+        if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
             g_ir_isr_attached = true;
         } else {
             ESP_LOGW(TABFORGE_TAG, "IR RX ISR handler add failed: %s", esp_err_to_name(err));
