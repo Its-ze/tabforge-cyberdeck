@@ -9,22 +9,26 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/uart.h"
+#include "esp_crt_bundle.h"
 #include "esp_app_desc.h"
 #include "esp_event.h"
+#include "esp_http_client.h"
 #include "esp_heap_caps.h"
+#include "esp_https_ota.h"
 #include "esp_io_expander.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
-#include "usb/cdc_acm_host.h"
+#include "cJSON.h"
 
 #ifndef TABFORGE_VERSION
 #define TABFORGE_VERSION "0.1.0"
@@ -73,12 +77,12 @@
 #define TABFORGE_EVENT_LOG_PATH TABFORGE_SD_ROOT "/tabforge/logs/events.jsonl"
 #define TABFORGE_MANIFEST_URL "https://its-ze.github.io/tabforge-cyberdeck/manifest.json"
 
-#define IMU_SAMPLE_PERIOD_MS 250
+#define IMU_SAMPLE_PERIOD_MS 100
+#define ROTATION_CHECK_MS 150
+#define ROTATION_CONFIRM_SAMPLES 2
 #define STATS_REFRESH_MS 1000
 #define MIC_SAMPLE_RATE 16000
 #define MIC_SAMPLES 512
-#define USB_CDC_BAUDRATE 115200
-#define USB_CDC_SCAN_TIMEOUT_MS 2500
 #define TABFORGE_EXT5V_EN IO_EXPANDER_PIN_NUM_2
 #define TABFORGE_CHARGE_ENABLE IO_EXPANDER_PIN_NUM_7
 #define TABFORGE_GROVE_TX_GPIO GPIO_NUM_53
@@ -100,7 +104,16 @@
 #define TABFORGE_BATTERY_POLL_MS 10000
 #define TABFORGE_NVS_NAMESPACE "tabforge"
 #define TABFORGE_NVS_SCREEN_TIMEOUT_KEY "scr_to_idx"
+#define TABFORGE_NVS_WIFI_SSID_KEY "wifi_ssid"
+#define TABFORGE_NVS_WIFI_PASS_KEY "wifi_pass"
 #define TABFORGE_SCREEN_WAKE_GRACE_MS 2000
+#define TABFORGE_SCREEN_DIM_GRACE_MS 10000
+#define TABFORGE_WIFI_MAX_APS 8
+#define TABFORGE_WIFI_MAX_SSID 33
+#define TABFORGE_WIFI_MAX_PASSWORD 65
+#define TABFORGE_WIFI_CONNECT_TIMEOUT_MS 15000
+#define TABFORGE_OTA_MANIFEST_MAX_BYTES 8192
+#define TABFORGE_PAHUB_I2C_ADDR 0x70
 
 typedef enum {
     FEATURE_ACTIVE,
@@ -135,6 +148,23 @@ typedef enum {
 } usb_state_t;
 
 typedef enum {
+    WIFI_STATE_OFF,
+    WIFI_STATE_READY,
+    WIFI_STATE_SCANNING,
+    WIFI_STATE_CONNECTING,
+    WIFI_STATE_CONNECTED,
+    WIFI_STATE_ERROR,
+} wifi_state_t;
+
+typedef enum {
+    OTA_STATE_IDLE,
+    OTA_STATE_FETCHING_MANIFEST,
+    OTA_STATE_DOWNLOADING,
+    OTA_STATE_READY_REBOOT,
+    OTA_STATE_ERROR,
+} ota_state_t;
+
+typedef enum {
     NAV_PAGE_APPS,
     NAV_PAGE_SETTINGS,
     NAV_PAGE_UPDATE,
@@ -154,6 +184,7 @@ typedef struct {
 typedef struct {
     lv_obj_t *status_label;
     lv_obj_t *battery_label;
+    lv_obj_t *battery_card_label;
     lv_obj_t *sd_label;
     lv_obj_t *addon_label;
     lv_obj_t *mode_label;
@@ -166,6 +197,13 @@ typedef struct {
     lv_obj_t *heart_label;
     lv_obj_t *screen_label;
     lv_obj_t *settings_screen_label;
+    lv_obj_t *wifi_label;
+    lv_obj_t *wifi_scan_label;
+    lv_obj_t *ota_label;
+    lv_obj_t *wifi_ssid_textarea;
+    lv_obj_t *wifi_password_textarea;
+    lv_obj_t *wifi_keyboard;
+    lv_obj_t *accessory_label;
     lv_obj_t *usb_label;
     lv_obj_t *ir_label;
     lv_obj_t *gyro_label;
@@ -187,15 +225,21 @@ typedef struct {
     lv_obj_t *mic_bar;
 } ui_refs_t;
 
+typedef struct {
+    char ssid[TABFORGE_WIFI_MAX_SSID];
+    char password[TABFORGE_WIFI_MAX_PASSWORD];
+    bool configured;
+    bool auto_connect;
+} wifi_credentials_t;
+
 static const feature_tile_t g_tiles[] = {
-    {LV_SYMBOL_ENVELOPE, "Meshtastic", "C6L serial dashboard, node status, channel text, direct sends.", "USB CDC", "tile_meshtastic", FEATURE_ACTIVE, 0x43d17a},
+    {LV_SYMBOL_WIFI, "Wi-Fi", "Scan, connect, and prepare internet OTA.", "Internet", "tile_update", FEATURE_ACTIVE, 0x70a7ff},
+    {LV_SYMBOL_ENVELOPE, "Messages", "Meshtastic C6L channel text and direct sends.", "Grove", "tile_meshtastic", FEATURE_ACTIVE, 0x43d17a},
     {LV_SYMBOL_SHUFFLE, "MeshCore", "Switchable command profile for MeshCore console work.", "Profile", "tile_meshcore", FEATURE_ACTIVE, 0x61d5f0},
-    {LV_SYMBOL_KEYBOARD, "T-Deck Link", "Companion status bridge for the LilyGO T-Deck/Z-Deck flow.", "Bridge", "tile_tdeck", FEATURE_ACTIVE, 0xf0bf4f},
-    {LV_SYMBOL_EYE_OPEN, "IR Lab", "Learn, label, replay, and store IR macros on SD.", "38 kHz", "tile_ir", FEATURE_ACTIVE, 0xff7a66},
-    {LV_SYMBOL_AUDIO, "Mic Deck", "Live level meter now, push-to-record WAV flow next.", "Live", "tile_mic", FEATURE_ACTIVE, 0xb982ff},
-    {LV_SYMBOL_USB, "USB Bay", "Host-side CDC, keyboard, mouse, and storage workbench.", "Host", "tile_usb", FEATURE_ACTIVE, 0x70a7ff},
-    {LV_SYMBOL_SD_CARD, "SD Field Log", "Runtime config, event journal, audio, IR, and backups.", "SD", "tile_sd", FEATURE_ACTIVE, 0x77dd88},
-    {LV_SYMBOL_DOWNLOAD, "Update Center", "GitHub manifest, SHA256 package checks, and confirm button.", "Stable", "tile_update", FEATURE_ACTIVE, 0xffc857},
+    {LV_SYMBOL_KEYBOARD, "T-Deck", "Companion bridge for the LilyGO T-Deck/Z-Deck flow.", "Bridge", "tile_tdeck", FEATURE_ACTIVE, 0xf0bf4f},
+    {LV_SYMBOL_AUDIO, "Recorder", "Live mic level now, push-to-record WAV flow next.", "Live", "tile_mic", FEATURE_ACTIVE, 0xb982ff},
+    {LV_SYMBOL_SD_CARD, "Files", "Runtime config, event journal, audio, and backups.", "SD", "tile_sd", FEATURE_ACTIVE, 0x77dd88},
+    {LV_SYMBOL_DOWNLOAD, "Update", "Internet OTA package checks and confirm button.", "OTA", "tile_update", FEATURE_ACTIVE, 0xffc857},
 };
 
 static const screen_timeout_option_t g_screen_timeouts[] = {
@@ -216,6 +260,7 @@ static bool g_sd_ready;
 static bool g_sd_recovered;
 static esp_err_t g_sd_last_error = ESP_OK;
 static bool g_meshcore_mode;
+static bool g_mesh_module_ready;
 static nav_page_t g_nav_page = NAV_PAGE_APPS;
 static uint32_t g_heartbeat_count;
 static bool g_ext_power_ready;
@@ -232,16 +277,8 @@ static esp_err_t g_grove_uart_error = ESP_OK;
 static uint32_t g_grove_rx_packets;
 static uint32_t g_grove_rx_bytes;
 static uint64_t g_grove_last_rx_ms;
-static bool g_usb_host_ready;
 static usb_state_t g_usb_state = USB_STATE_OFF;
 static esp_err_t g_usb_last_error = ESP_OK;
-static uint32_t g_usb_open_count;
-static uint32_t g_usb_disconnect_count;
-static uint32_t g_usb_rx_packets;
-static uint32_t g_usb_rx_bytes;
-static uint64_t g_usb_last_rx_ms;
-static cdc_acm_dev_hdl_t g_usb_cdc_handle;
-static bool g_usb_cdc_disconnected;
 static i2c_master_dev_handle_t g_battery_monitor;
 static bool g_battery_online;
 static esp_err_t g_battery_last_error = ESP_ERR_NOT_FOUND;
@@ -253,14 +290,40 @@ static bool g_screen_sleeping;
 static esp_err_t g_screen_power_error = ESP_OK;
 static uint32_t g_screen_sleep_count;
 static uint32_t g_screen_sleep_start_ms;
+static bool g_screen_dimmed;
+static uint32_t g_screen_dim_start_ms;
 static volatile uint32_t g_input_activity_seq;
 static uint32_t g_sleep_input_seq;
+static bool g_wifi_started;
+static bool g_wifi_has_ip;
+static bool g_wifi_boot_scan_started;
+static wifi_state_t g_wifi_state = WIFI_STATE_OFF;
+static esp_err_t g_wifi_last_error = ESP_OK;
+static wifi_credentials_t g_wifi_credentials;
+static wifi_ap_record_t g_wifi_aps[TABFORGE_WIFI_MAX_APS];
+static uint16_t g_wifi_ap_count;
+static uint16_t g_wifi_selected_ap;
+static char g_wifi_ip[16] = "--";
+static char g_ota_manifest_url[256] = TABFORGE_MANIFEST_URL;
+static char g_ota_firmware_url[256] = "";
+static char g_ota_version[32] = "";
+static ota_state_t g_ota_state = OTA_STATE_IDLE;
+static esp_err_t g_ota_last_error = ESP_OK;
+static bool g_ota_reboot_pending;
+static bool g_accessory_probe_started;
+static uint8_t g_accessory_i2c_count;
+static bool g_accessory_pahub_ready;
+static char g_accessory_i2c_summary[96] = "not scanned";
 
 #if BSP_CAPS_IMU
 static sensor_handle_t g_imu_sensor_handle;
+static sensor_event_handler_instance_t g_imu_handler_instance;
 #endif
 static bool g_imu_online;
 static bool g_imu_ready;
+
+static void init_grove_uart_probe(void);
+static void poll_grove_uart(void);
 static axis3_t g_last_acce;
 static axis3_t g_last_gyro;
 static uint64_t g_last_imu_ms;
@@ -305,12 +368,23 @@ static int32_t deck_height(void)
 
 static const char *active_mode_name(void)
 {
+    if (!g_mesh_module_ready) {
+        return "NO MESH";
+    }
     return g_meshcore_mode ? "MESHCORE" : "MESHTASTIC";
 }
 
 static const char *active_mode_detail(void)
 {
+    if (!g_mesh_module_ready) {
+        return "No mesh radio detected";
+    }
     return g_meshcore_mode ? "MeshCore console profile armed" : "Meshtastic C6L profile armed";
+}
+
+static const char *selected_mesh_profile_name(void)
+{
+    return g_meshcore_mode ? "MeshCore" : "Meshtastic";
 }
 
 static const char *mic_state_text(void)
@@ -336,16 +410,52 @@ static const char *usb_state_text(void)
     case USB_STATE_POWERED:
         return "powered";
     case USB_STATE_SCANNING:
-        return "scanning";
+        return "power on";
     case USB_STATE_OPEN:
-        return "cdc open";
+        return "power on";
     case USB_STATE_DISCONNECTED:
-        return "disconnected";
+        return "power on";
     case USB_STATE_ERROR:
         return "error";
     case USB_STATE_OFF:
     default:
         return "off";
+    }
+}
+
+static const char *wifi_state_text(void)
+{
+    switch (g_wifi_state) {
+    case WIFI_STATE_READY:
+        return "ready";
+    case WIFI_STATE_SCANNING:
+        return "scanning";
+    case WIFI_STATE_CONNECTING:
+        return "connecting";
+    case WIFI_STATE_CONNECTED:
+        return "connected";
+    case WIFI_STATE_ERROR:
+        return "error";
+    case WIFI_STATE_OFF:
+    default:
+        return "off";
+    }
+}
+
+static const char *ota_state_text(void)
+{
+    switch (g_ota_state) {
+    case OTA_STATE_FETCHING_MANIFEST:
+        return "manifest";
+    case OTA_STATE_DOWNLOADING:
+        return "downloading";
+    case OTA_STATE_READY_REBOOT:
+        return "ready";
+    case OTA_STATE_ERROR:
+        return "error";
+    case OTA_STATE_IDLE:
+    default:
+        return "idle";
     }
 }
 
@@ -429,7 +539,7 @@ static void format_screen_status(char *buffer, size_t buffer_size)
     }
 
     snprintf(buffer, buffer_size, "%s | %s",
-             g_screen_sleeping ? "sleep" : "awake",
+             g_screen_sleeping ? "sleep" : (g_screen_dimmed ? "dim" : "awake"),
              screen_timeout_label());
 }
 
@@ -441,14 +551,14 @@ static void refresh_screen_widgets_locked(void)
     if (g_ui.screen_label != NULL) {
         lv_label_set_text(g_ui.screen_label, screen_status);
         lv_obj_set_style_text_color(g_ui.screen_label,
-                                    g_screen_sleeping ? color_hex(0xffc857) : color_hex(0x6ee7a2),
+                                    (g_screen_sleeping || g_screen_dimmed) ? color_hex(0xffc857) : color_hex(0x6ee7a2),
                                     0);
     }
 
     if (g_ui.settings_screen_label != NULL) {
         lv_label_set_text(g_ui.settings_screen_label, screen_status);
         lv_obj_set_style_text_color(g_ui.settings_screen_label,
-                                    g_screen_sleeping ? color_hex(0xffc857) : color_hex(0xf1f7f3),
+                                    (g_screen_sleeping || g_screen_dimmed) ? color_hex(0xffc857) : color_hex(0xf1f7f3),
                                     0);
     }
 }
@@ -549,6 +659,43 @@ static void save_screen_timeout_setting(void)
     }
 }
 
+static void enter_screen_dim(const char *event_name)
+{
+    if (g_screen_sleeping || g_screen_dimmed) {
+        return;
+    }
+
+    esp_err_t err = bsp_display_brightness_set(12);
+    g_screen_power_error = err;
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "screen dim failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    g_screen_dimmed = true;
+    g_screen_dim_start_ms = now_ms_u32();
+    append_event(event_name);
+    ESP_LOGI(TABFORGE_TAG, "screen dim entered before sleep");
+}
+
+static void exit_screen_dim(const char *event_name)
+{
+    if (!g_screen_dimmed) {
+        return;
+    }
+
+    esp_err_t err = bsp_display_brightness_set(100);
+    g_screen_power_error = err;
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "screen undim failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    g_screen_dimmed = false;
+    lv_display_trigger_activity(g_display);
+    append_event(event_name);
+}
+
 static void enter_screen_sleep(const char *event_name)
 {
     if (g_screen_sleeping) {
@@ -563,6 +710,7 @@ static void enter_screen_sleep(const char *event_name)
     }
 
     g_screen_sleeping = true;
+    g_screen_dimmed = false;
     g_screen_sleep_count++;
     g_screen_sleep_start_ms = now_ms_u32();
     g_sleep_input_seq = g_input_activity_seq;
@@ -584,8 +732,10 @@ static void exit_screen_sleep(const char *event_name)
         ESP_LOGW(TABFORGE_TAG, "screen wake failed: %s", esp_err_to_name(err));
         return;
     }
+    bsp_display_brightness_set(100);
 
     g_screen_sleeping = false;
+    g_screen_dimmed = false;
     lv_display_trigger_activity(g_display);
     append_event(event_name);
     ESP_LOGI(TABFORGE_TAG, "screen woke: %s", event_name);
@@ -620,8 +770,9 @@ static void write_default_config_if_missing(void)
             "  \"defaultMode\": \"meshtastic\",\n"
             "  \"updateChannel\": \"stable\",\n"
             "  \"ui\": { \"home\": \"tablet\", \"autoRotate\": true, \"liveStats\": true, \"screenTimeoutSeconds\": 120, \"sleepOnTimeout\": true },\n"
+            "  \"wifi\": { \"ssid\": \"\", \"password\": \"\", \"autoConnect\": false },\n"
             "  \"devices\": {\n"
-            "    \"unit-c6l\": { \"enabled\": true, \"preferredTransport\": \"usb-cdc\", \"mode\": \"meshtastic\" },\n"
+            "    \"unit-c6l\": { \"enabled\": true, \"preferredTransport\": \"grove-uart\", \"mode\": \"meshtastic\" },\n"
             "    \"tdeck\": { \"enabled\": true, \"preferredTransport\": \"usb-cdc\", \"mode\": \"zdeck-meshtastic\" },\n"
             "    \"unit-ir\": { \"enabled\": true, \"preferredTransport\": \"grove-port-b\" }\n"
             "  },\n"
@@ -630,6 +781,119 @@ static void write_default_config_if_missing(void)
             TABFORGE_MANIFEST_URL);
     fclose(f);
     ESP_LOGI(TABFORGE_TAG, "created default config at %s", TABFORGE_CONFIG_PATH);
+}
+
+static void copy_json_string(cJSON *object, const char *name, char *buffer, size_t buffer_size)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(object, name);
+    if (cJSON_IsString(item) && item->valuestring != NULL && buffer_size > 0) {
+        strlcpy(buffer, item->valuestring, buffer_size);
+    }
+}
+
+static void load_wifi_credentials_from_nvs(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(TABFORGE_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return;
+    }
+
+    size_t ssid_len = sizeof(g_wifi_credentials.ssid);
+    size_t pass_len = sizeof(g_wifi_credentials.password);
+    bool have_ssid = nvs_get_str(handle, TABFORGE_NVS_WIFI_SSID_KEY, g_wifi_credentials.ssid, &ssid_len) == ESP_OK;
+    bool have_pass = nvs_get_str(handle, TABFORGE_NVS_WIFI_PASS_KEY, g_wifi_credentials.password, &pass_len) == ESP_OK;
+    g_wifi_credentials.configured = have_ssid && g_wifi_credentials.ssid[0] != '\0';
+    if (have_pass) {
+        g_wifi_credentials.password[sizeof(g_wifi_credentials.password) - 1] = '\0';
+    }
+
+    nvs_close(handle);
+}
+
+static void save_wifi_credentials_to_nvs(void)
+{
+    if (!g_wifi_credentials.configured || g_wifi_credentials.ssid[0] == '\0') {
+        return;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(TABFORGE_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "wifi credentials save failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_set_str(handle, TABFORGE_NVS_WIFI_SSID_KEY, g_wifi_credentials.ssid);
+    if (err == ESP_OK) {
+        err = nvs_set_str(handle, TABFORGE_NVS_WIFI_PASS_KEY, g_wifi_credentials.password);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "wifi credentials save failed: %s", esp_err_to_name(err));
+    }
+}
+
+static void load_runtime_config(void)
+{
+    load_wifi_credentials_from_nvs();
+
+    FILE *f = fopen(TABFORGE_CONFIG_PATH, "rb");
+    if (f == NULL) {
+        return;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return;
+    }
+    long file_size = ftell(f);
+    if (file_size <= 0 || file_size > 8192 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return;
+    }
+
+    char *json = heap_caps_malloc((size_t)file_size + 1U, MALLOC_CAP_INTERNAL);
+    if (json == NULL) {
+        fclose(f);
+        return;
+    }
+
+    size_t read_len = fread(json, 1, (size_t)file_size, f);
+    fclose(f);
+    json[read_len] = '\0';
+
+    cJSON *root = cJSON_Parse(json);
+    heap_caps_free(json);
+    if (root == NULL) {
+        ESP_LOGW(TABFORGE_TAG, "config JSON parse failed");
+        return;
+    }
+
+    cJSON *wifi = cJSON_GetObjectItemCaseSensitive(root, "wifi");
+    if (cJSON_IsObject(wifi)) {
+        copy_json_string(wifi, "ssid", g_wifi_credentials.ssid, sizeof(g_wifi_credentials.ssid));
+        copy_json_string(wifi, "password", g_wifi_credentials.password, sizeof(g_wifi_credentials.password));
+        cJSON *auto_connect = cJSON_GetObjectItemCaseSensitive(wifi, "autoConnect");
+        if (cJSON_IsBool(auto_connect)) {
+            g_wifi_credentials.auto_connect = cJSON_IsTrue(auto_connect);
+        }
+        g_wifi_credentials.configured = g_wifi_credentials.ssid[0] != '\0';
+        if (g_wifi_credentials.configured) {
+            save_wifi_credentials_to_nvs();
+        }
+    }
+
+    cJSON *ota = cJSON_GetObjectItemCaseSensitive(root, "ota");
+    if (cJSON_IsObject(ota)) {
+        copy_json_string(ota, "manifestUrl", g_ota_manifest_url, sizeof(g_ota_manifest_url));
+    }
+
+    cJSON_Delete(root);
 }
 
 static void append_event(const char *event)
@@ -823,11 +1087,14 @@ static lv_obj_t *make_text(lv_obj_t *parent, const char *text, uint32_t color, l
 static lv_obj_t *make_button(lv_obj_t *parent, lv_coord_t width, const char *label_text, lv_event_cb_t cb)
 {
     lv_obj_t *button = lv_button_create(parent);
-    lv_obj_set_size(button, width, 44);
-    lv_obj_set_style_radius(button, 8, 0);
-    lv_obj_set_style_bg_color(button, color_hex(0x202b31), 0);
+    lv_obj_set_size(button, width, 48);
+    lv_obj_set_style_radius(button, 24, 0);
+    lv_obj_set_style_bg_color(button, color_hex(0x20313a), 0);
     lv_obj_set_style_border_width(button, 1, 0);
-    lv_obj_set_style_border_color(button, color_hex(0x3c525a), 0);
+    lv_obj_set_style_border_color(button, color_hex(0x38505a), 0);
+    lv_obj_set_style_shadow_width(button, 10, 0);
+    lv_obj_set_style_shadow_color(button, color_hex(0x05080a), 0);
+    lv_obj_set_style_shadow_opa(button, LV_OPA_30, 0);
     lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(button, cb, LV_EVENT_CLICKED, NULL);
@@ -854,9 +1121,10 @@ static nav_button_refs_t make_nav_button(lv_obj_t *parent,
     nav_button_refs_t refs = {0};
     lv_obj_t *button = lv_button_create(parent);
     refs.button = button;
-    lv_obj_set_size(button, width, 68);
-    lv_obj_set_style_radius(button, 8, 0);
-    lv_obj_set_style_bg_color(button, color_hex(0x151b20), 0);
+    lv_obj_set_size(button, width, 64);
+    lv_obj_set_style_radius(button, 22, 0);
+    lv_obj_set_style_bg_color(button, color_hex(0x10161a), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(button, 0, 0);
     lv_obj_set_style_pad_all(button, 6, 0);
     lv_obj_set_flex_flow(button, LV_FLEX_FLOW_COLUMN);
@@ -896,7 +1164,8 @@ static lv_obj_t *add_stat_card(lv_obj_t *parent,
                                lv_coord_t height,
                                uint32_t accent)
 {
-    lv_obj_t *card = make_panel(parent, width, height, 0x13181c, accent);
+    lv_obj_t *card = make_panel(parent, width, height, 0x151d22, accent);
+    lv_obj_set_style_radius(card, 18, 0);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(card, 5, 0);
@@ -945,11 +1214,12 @@ static void style_nav_button(const nav_button_refs_t *nav, bool active, uint32_t
         return;
     }
 
-    uint32_t bg = active ? 0x20312b : 0x151b20;
+    uint32_t bg = active ? 0x20313a : 0x10161a;
     uint32_t text = active ? 0xf1f7f3 : 0x93a6ad;
     uint32_t icon = active ? accent : 0x6ee7a2;
 
     lv_obj_set_style_bg_color(nav->button, color_hex(bg), 0);
+    lv_obj_set_style_bg_opa(nav->button, active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(nav->button, active ? 1 : 0, 0);
     lv_obj_set_style_border_color(nav->button, color_hex(accent), 0);
     if (nav->icon != NULL) {
@@ -964,7 +1234,7 @@ static void refresh_nav_styles(void)
 {
     style_nav_button(&g_ui.nav_apps, g_nav_page == NAV_PAGE_APPS, 0x6ee7a2);
     style_nav_button(&g_ui.nav_settings, g_nav_page == NAV_PAGE_SETTINGS, 0x61d5f0);
-    style_nav_button(&g_ui.nav_mode, g_meshcore_mode, 0xf0bf4f);
+    style_nav_button(&g_ui.nav_mode, g_mesh_module_ready, 0xf0bf4f);
     style_nav_button(&g_ui.nav_auto, g_auto_rotate, 0x77dd88);
     style_nav_button(&g_ui.nav_update, g_nav_page == NAV_PAGE_UPDATE, 0xffc857);
 }
@@ -978,14 +1248,14 @@ static void show_nav_page(nav_page_t page)
 
     switch (page) {
     case NAV_PAGE_SETTINGS:
-        set_activity("Settings", "Touch-ready controls: mesh profile, rotation, screen timeout, sleep, add-on power, SD, USB, and OTA status.");
+        set_activity("Settings", "Wi-Fi, display, sleep, mesh profile, rotation, SD, battery, and updates.");
         break;
     case NAV_PAGE_UPDATE:
-        set_activity("Update Center", "GitHub Pages manifest selected. OTA staging waits for explicit button confirmation.");
+        set_activity("Wi-Fi & Internet", "Scan networks, type a password, connect, then run internet OTA.");
         break;
     case NAV_PAGE_APPS:
     default:
-        set_activity("Apps", "Launcher grid active: Meshtastic, MeshCore, T-Deck, IR, mic, USB, SD, and updates.");
+        set_activity("Apps", "Launcher grid active: Wi-Fi, mesh profiles, T-Deck, mic, SD, and updates.");
         break;
     }
 
@@ -995,14 +1265,11 @@ static void show_nav_page(nav_page_t page)
 static void refresh_mode_widgets(void)
 {
     if (g_ui.status_label != NULL) {
-        lv_label_set_text_fmt(g_ui.status_label,
-                              "TabForge %s   %s",
-                              TABFORGE_VERSION,
-                              active_mode_name());
+        lv_label_set_text_fmt(g_ui.status_label, "TabForge");
     }
 
     if (g_ui.mode_label != NULL) {
-        lv_label_set_text_fmt(g_ui.mode_label, "%s mode", active_mode_name());
+        lv_label_set_text_fmt(g_ui.mode_label, "%s", active_mode_name());
     }
 
     if (g_ui.mode_detail_label != NULL) {
@@ -1010,7 +1277,7 @@ static void refresh_mode_widgets(void)
     }
 
     if (g_ui.dock_mode_label != NULL) {
-        lv_label_set_text(g_ui.dock_mode_label, g_meshcore_mode ? "Mesh" : "Core");
+        lv_label_set_text(g_ui.dock_mode_label, g_mesh_module_ready ? selected_mesh_profile_name() : "Mesh");
     }
 
     refresh_nav_styles();
@@ -1020,10 +1287,9 @@ static void refresh_rotation_widgets(void)
 {
     if (g_ui.rotation_label != NULL) {
         lv_label_set_text_fmt(g_ui.rotation_label,
-                              "%s   %d deg   auto %s",
-                              rotation_name(g_rotation),
-                              rotation_degrees(g_rotation),
-                              g_auto_rotate ? "on" : "off");
+                              "%s  %d deg",
+                              g_auto_rotate ? "Auto" : "Locked",
+                              rotation_degrees(g_rotation));
     }
 
     if (g_ui.dock_auto_label != NULL) {
@@ -1031,6 +1297,128 @@ static void refresh_rotation_widgets(void)
     }
 
     refresh_nav_styles();
+}
+
+static void format_wifi_status(char *buffer, size_t buffer_size)
+{
+    if (g_wifi_state == WIFI_STATE_CONNECTED) {
+        snprintf(buffer, buffer_size, "%s | %s",
+                 g_wifi_credentials.ssid[0] != '\0' ? g_wifi_credentials.ssid : "Wi-Fi",
+                 g_wifi_ip);
+    } else if (g_wifi_last_error != ESP_OK) {
+        snprintf(buffer, buffer_size, "%s | %s", wifi_state_text(), esp_err_to_name(g_wifi_last_error));
+    } else if (g_wifi_credentials.configured) {
+        snprintf(buffer, buffer_size, "%s | saved %s", wifi_state_text(), g_wifi_credentials.ssid);
+    } else {
+        snprintf(buffer, buffer_size, "%s | no saved AP", wifi_state_text());
+    }
+}
+
+static void format_wifi_scan_status(char *buffer, size_t buffer_size)
+{
+    if (g_wifi_ap_count == 0) {
+        snprintf(buffer, buffer_size, "No scan results yet");
+        return;
+    }
+
+    wifi_ap_record_t *ap = &g_wifi_aps[g_wifi_selected_ap % g_wifi_ap_count];
+    snprintf(buffer, buffer_size, "%u/%u %s %ddBm %s",
+             (unsigned)(g_wifi_selected_ap + 1U),
+             (unsigned)g_wifi_ap_count,
+             (const char *)ap->ssid,
+             (int)ap->rssi,
+             ap->authmode == WIFI_AUTH_OPEN ? "open" : "secured");
+}
+
+static void format_accessory_status(char *buffer, size_t buffer_size)
+{
+    snprintf(buffer, buffer_size, "Grove %s | USB-A %s | I2C %s",
+             g_ext_power_ready ? "on" : "off",
+             g_usb_power_ready ? "on" : "off",
+             g_accessory_i2c_summary);
+}
+
+static void refresh_wifi_widgets_locked(void)
+{
+    char status[96];
+    char scan[96];
+    format_wifi_status(status, sizeof(status));
+    format_wifi_scan_status(scan, sizeof(scan));
+
+    if (g_ui.wifi_label != NULL) {
+        lv_label_set_text(g_ui.wifi_label, status);
+        lv_obj_set_style_text_color(g_ui.wifi_label,
+                                    g_wifi_state == WIFI_STATE_CONNECTED ? color_hex(0x6ee7a2) : color_hex(0xffc857),
+                                    0);
+    }
+    if (g_ui.wifi_scan_label != NULL) {
+        lv_label_set_text(g_ui.wifi_scan_label, scan);
+    }
+    if (g_ui.ota_label != NULL) {
+        if (g_ota_state == OTA_STATE_ERROR) {
+            lv_label_set_text_fmt(g_ui.ota_label, "%s | %s", ota_state_text(), esp_err_to_name(g_ota_last_error));
+        } else if (g_ota_firmware_url[0] != '\0') {
+            lv_label_set_text_fmt(g_ui.ota_label, "%s | %s", ota_state_text(), g_ota_version[0] != '\0' ? g_ota_version : "firmware found");
+        } else {
+            lv_label_set_text_fmt(g_ui.ota_label, "%s | %s", ota_state_text(), g_ota_manifest_url);
+        }
+    }
+}
+
+static void refresh_accessory_widgets_locked(void)
+{
+    if (g_ui.accessory_label != NULL) {
+        char status[64];
+        format_accessory_status(status, sizeof(status));
+        lv_label_set_text(g_ui.accessory_label, status);
+        lv_obj_set_style_text_color(g_ui.accessory_label,
+                                    (g_ext_power_ready || g_usb_power_ready) ? color_hex(0x6ee7a2) : color_hex(0xffc857),
+                                    0);
+    }
+}
+
+static void set_accessory_power(bool enable)
+{
+    esp_io_expander_handle_t grove_expander = bsp_io_expander_init();
+    esp_io_expander_handle_t power_expander = bsp_io_expander1_init();
+
+    if (grove_expander != NULL) {
+        g_ext_power_error = set_expander_output(grove_expander, TABFORGE_EXT5V_EN, enable);
+        g_ext_power_ready = enable && (g_ext_power_error == ESP_OK);
+    } else {
+        g_ext_power_error = ESP_ERR_NOT_SUPPORTED;
+        g_ext_power_ready = false;
+    }
+
+    if (power_expander != NULL) {
+        g_usb_power_error = set_expander_output(power_expander, BSP_USB_EN, enable);
+        g_usb_power_ready = enable && (g_usb_power_error == ESP_OK);
+    } else {
+        g_usb_power_error = ESP_ERR_NOT_SUPPORTED;
+        g_usb_power_ready = false;
+    }
+
+    if (!enable) {
+        g_usb_state = USB_STATE_OFF;
+        g_mesh_module_ready = false;
+    } else if (g_usb_power_ready) {
+        g_usb_state = USB_STATE_POWERED;
+    }
+
+    ESP_LOGI(TABFORGE_TAG, "accessory rails %s: grove=%s usb=%s",
+             enable ? "enabled" : "disabled",
+             g_ext_power_ready ? "on" : esp_err_to_name(g_ext_power_error),
+             g_usb_power_ready ? "on" : esp_err_to_name(g_usb_power_error));
+}
+
+static void start_accessory_probe_tasks(void)
+{
+    if (g_accessory_probe_started) {
+        return;
+    }
+    g_accessory_probe_started = true;
+    init_grove_uart_probe();
+    ESP_LOGI(TABFORGE_TAG, "C6L Grove UART link armed for Meshtastic/MeshCore switching");
 }
 
 static void refresh_live_stats_locked(void)
@@ -1043,6 +1431,14 @@ static void refresh_live_stats_locked(void)
     if (g_ui.battery_label != NULL) {
         lv_label_set_text(g_ui.battery_label, battery_status);
         lv_obj_set_style_text_color(g_ui.battery_label,
+                                    g_battery_online ? color_hex(0x6ee7a2) : color_hex(0xffc857),
+                                    0);
+    }
+    if (g_ui.battery_card_label != NULL) {
+        char battery_detail[32];
+        format_battery_status(battery_detail, sizeof(battery_detail), false);
+        lv_label_set_text(g_ui.battery_card_label, battery_detail);
+        lv_obj_set_style_text_color(g_ui.battery_card_label,
                                     g_battery_online ? color_hex(0x6ee7a2) : color_hex(0xffc857),
                                     0);
     }
@@ -1078,20 +1474,6 @@ static void refresh_live_stats_locked(void)
         lv_obj_set_style_text_color(g_ui.sd_label, g_sd_ready ? color_hex(0x6ee7a2) : color_hex(0xff7a66), 0);
     }
 
-    if (g_ui.addon_label != NULL) {
-        const char *ext = g_ext_power_ready ? "PA 5V" : "PA err";
-        const char *usb = g_usb_power_ready ? "USB 5V" : "USB err";
-        const char *grove = g_grove_uart_ready ? "Grove RX" : (g_ir_probe_ready ? "IR ready" : "Grove wait");
-        lv_label_set_text_fmt(g_ui.addon_label,
-                              "%s | %s | %s",
-                              ext,
-                              usb,
-                              grove);
-        lv_obj_set_style_text_color(g_ui.addon_label,
-                                    (g_ext_power_ready && g_usb_power_ready && g_usb_host_ready) ? color_hex(0x6ee7a2) : color_hex(0xffc857),
-                                    0);
-    }
-
     if (g_ui.mic_label != NULL) {
         if (g_mic_state == MIC_STATE_ONLINE) {
             lv_label_set_text_fmt(g_ui.mic_label, "avg %d | peak %d", g_mic_average, g_mic_peak);
@@ -1121,39 +1503,33 @@ static void refresh_live_stats_locked(void)
 
     if (g_ui.usb_label != NULL) {
         if (!g_usb_power_ready) {
-            lv_label_set_text_fmt(g_ui.usb_label, "5V %s", esp_err_to_name(g_usb_power_error));
-        } else if (g_usb_state == USB_STATE_OPEN) {
-            uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
-            uint64_t age_ms = g_usb_last_rx_ms > 0 ? now_ms - g_usb_last_rx_ms : 0;
-            lv_label_set_text_fmt(g_ui.usb_label,
-                                  "open %lu | %luB | %llums",
-                                  (unsigned long)g_usb_open_count,
-                                  (unsigned long)g_usb_rx_bytes,
-                                  (unsigned long long)age_ms);
+            lv_label_set_text_fmt(g_ui.usb_label, "USB-A 5V %s", esp_err_to_name(g_usb_power_error));
         } else if (g_usb_last_error != ESP_OK) {
-            lv_label_set_text_fmt(g_ui.usb_label, "%s | %s", usb_state_text(), esp_err_to_name(g_usb_last_error));
+            lv_label_set_text_fmt(g_ui.usb_label, "USB-A %s", esp_err_to_name(g_usb_last_error));
         } else {
-            lv_label_set_text_fmt(g_ui.usb_label, "%s", usb_state_text());
+            lv_label_set_text(g_ui.usb_label, "USB-A power on");
         }
     }
 
     if (g_ui.ir_label != NULL) {
-        if (g_ir_probe_ready) {
+        if (g_grove_uart_ready) {
             uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
             uint64_t age_s = g_grove_last_rx_ms > 0 ? (now_ms - g_grove_last_rx_ms) / 1000ULL : 0;
-            lv_label_set_text_fmt(g_ui.ir_label,
-                                  "IR L%d E%lu | UART %luB/%lu %llus",
-                                  g_ir_level,
-                                  (unsigned long)g_ir_edges,
-                                  (unsigned long)g_grove_rx_bytes,
-                                  (unsigned long)g_grove_rx_packets,
-                                  (unsigned long long)age_s);
+            if (g_grove_rx_packets > 0) {
+                lv_label_set_text_fmt(g_ui.ir_label,
+                                      "C6L Grove linked | %luB/%lu | %llus",
+                                      (unsigned long)g_grove_rx_bytes,
+                                      (unsigned long)g_grove_rx_packets,
+                                      (unsigned long long)age_s);
+            } else {
+                lv_label_set_text(g_ui.ir_label, "C6L Grove ready | waiting for traffic");
+            }
         } else if (g_ext_power_error != ESP_OK) {
             lv_label_set_text_fmt(g_ui.ir_label, "power %s", esp_err_to_name(g_ext_power_error));
         } else if (g_grove_uart_error != ESP_OK) {
             lv_label_set_text_fmt(g_ui.ir_label, "uart %s", esp_err_to_name(g_grove_uart_error));
         } else {
-            lv_label_set_text(g_ui.ir_label, "probe pending");
+            lv_label_set_text(g_ui.ir_label, "C6L Grove pending");
         }
     }
 
@@ -1173,13 +1549,15 @@ static void refresh_live_stats_locked(void)
     }
 
     if (g_ui.heart_label != NULL) {
-        lv_label_set_text_fmt(g_ui.heart_label, "beat %lu | %s | drop %lu",
+        lv_label_set_text_fmt(g_ui.heart_label, "beat %lu | %s | C6L %lu",
                               (unsigned long)g_heartbeat_count,
                               battery_status,
-                              (unsigned long)g_usb_disconnect_count);
+                              (unsigned long)g_grove_rx_packets);
     }
 
     refresh_screen_widgets_locked();
+    refresh_wifi_widgets_locked();
+    refresh_accessory_widgets_locked();
     refresh_mode_widgets();
     refresh_rotation_widgets();
 }
@@ -1198,30 +1576,38 @@ static void feature_tile_event_cb(lv_event_t *event)
     set_activity(tile->name, tile->summary);
     append_event(tile->event_name);
     ESP_LOGI(TABFORGE_TAG, "tile selected: %s", tile->name);
+
+    if (strcmp(tile->event_name, "tile_update") == 0) {
+        show_nav_page(NAV_PAGE_UPDATE);
+    }
 }
 
 static void add_app_tile(lv_obj_t *parent, const feature_tile_t *tile, lv_coord_t width, lv_coord_t height)
 {
     lv_obj_t *button = lv_button_create(parent);
     lv_obj_set_size(button, width, height);
-    lv_obj_set_style_radius(button, 8, 0);
+    lv_obj_set_style_radius(button, 20, 0);
     lv_obj_set_style_border_width(button, 0, 0);
-    lv_obj_set_style_bg_color(button, color_hex(0x0f151a), 0);
-    lv_obj_set_style_pad_all(button, 8, 0);
+    lv_obj_set_style_bg_color(button, color_hex(0x090d10), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(button, 4, 0);
     lv_obj_set_flex_flow(button, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(button, 7, 0);
+    lv_obj_set_style_pad_row(button, 6, 0);
     lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(button, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
 
     lv_obj_t *icon_box = lv_obj_create(button);
-    lv_obj_set_size(icon_box, 58, 58);
-    lv_obj_set_style_radius(icon_box, 8, 0);
-    lv_obj_set_style_border_width(icon_box, 1, 0);
-    lv_obj_set_style_border_color(icon_box, color_hex(tile->accent), 0);
-    lv_obj_set_style_bg_color(icon_box, color_hex(0x182127), 0);
+    lv_coord_t icon_size = height > 108 ? 68 : 58;
+    lv_obj_set_size(icon_box, icon_size, icon_size);
+    lv_obj_set_style_radius(icon_box, 18, 0);
+    lv_obj_set_style_border_width(icon_box, 0, 0);
+    lv_obj_set_style_bg_color(icon_box, color_hex(tile->accent), 0);
     lv_obj_set_style_bg_opa(icon_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_shadow_width(icon_box, 14, 0);
+    lv_obj_set_style_shadow_color(icon_box, color_hex(0x030506), 0);
+    lv_obj_set_style_shadow_opa(icon_box, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(icon_box, 0, 0);
     lv_obj_clear_flag(icon_box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(icon_box, LV_OBJ_FLAG_CLICKABLE);
@@ -1229,7 +1615,7 @@ static void add_app_tile(lv_obj_t *parent, const feature_tile_t *tile, lv_coord_
 
     lv_obj_t *icon = lv_label_create(icon_box);
     lv_label_set_text(icon, tile->code);
-    lv_obj_set_style_text_color(icon, color_hex(tile->accent), 0);
+    lv_obj_set_style_text_color(icon, color_hex(0x081014), 0);
     lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
     lv_obj_center(icon);
     lv_obj_add_flag(icon, LV_OBJ_FLAG_CLICKABLE);
@@ -1239,11 +1625,410 @@ static void add_app_tile(lv_obj_t *parent, const feature_tile_t *tile, lv_coord_
     lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_add_flag(name, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(name, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
+}
 
-    lv_obj_t *metric = make_text(button, tile->metric, tile->state == FEATURE_ACTIVE ? 0x6ee7a2 : 0xffc857, width - 12);
-    lv_obj_set_style_text_align(metric, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_add_flag(metric, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(metric, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
+static void update_activity_from_task(const char *title, const char *detail)
+{
+    if (bsp_display_lock(1000)) {
+        set_activity(title, detail);
+        refresh_wifi_widgets_locked();
+        bsp_display_unlock();
+    }
+}
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    (void)arg;
+
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        g_wifi_has_ip = false;
+        g_wifi_ip[0] = '-';
+        g_wifi_ip[1] = '-';
+        g_wifi_ip[2] = '\0';
+        if (g_wifi_state == WIFI_STATE_CONNECTED || g_wifi_state == WIFI_STATE_CONNECTING) {
+            g_wifi_state = WIFI_STATE_READY;
+        }
+        append_event("wifi_disconnected");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        snprintf(g_wifi_ip, sizeof(g_wifi_ip), IPSTR, IP2STR(&event->ip_info.ip));
+        g_wifi_has_ip = true;
+        g_wifi_state = WIFI_STATE_CONNECTED;
+        g_wifi_last_error = ESP_OK;
+        append_event("wifi_connected");
+        ESP_LOGI(TABFORGE_TAG, "wifi connected: %s %s", g_wifi_credentials.ssid, g_wifi_ip);
+    }
+}
+
+static void wifi_scan_task(void *arg)
+{
+    (void)arg;
+    if (!g_wifi_started) {
+        g_wifi_state = WIFI_STATE_ERROR;
+        g_wifi_last_error = ESP_ERR_INVALID_STATE;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    g_wifi_state = WIFI_STATE_SCANNING;
+    update_activity_from_task("Wi-Fi Scan", "Scanning nearby access points.");
+
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0,
+        .show_hidden = false,
+    };
+    esp_err_t err = esp_wifi_scan_start(&scan_config, true);
+    if (err == ESP_OK) {
+        uint16_t ap_count = TABFORGE_WIFI_MAX_APS;
+        err = esp_wifi_scan_get_ap_records(&ap_count, g_wifi_aps);
+        if (err == ESP_OK) {
+            g_wifi_ap_count = ap_count;
+            g_wifi_selected_ap = 0;
+            g_wifi_state = g_wifi_has_ip ? WIFI_STATE_CONNECTED : WIFI_STATE_READY;
+            append_event("wifi_scan_done");
+            ESP_LOGI(TABFORGE_TAG, "wifi scan found %u network%s",
+                     (unsigned)ap_count,
+                     ap_count == 1 ? "" : "s");
+            for (uint16_t i = 0; i < ap_count; ++i) {
+                ESP_LOGI(TABFORGE_TAG, "wifi ap %u: ssid=\"%s\" rssi=%d auth=%s",
+                         (unsigned)(i + 1U),
+                         (const char *)g_wifi_aps[i].ssid,
+                         (int)g_wifi_aps[i].rssi,
+                         g_wifi_aps[i].authmode == WIFI_AUTH_OPEN ? "open" : "secured");
+            }
+            if (ap_count > 0 && bsp_display_lock(1000)) {
+                if (g_ui.wifi_ssid_textarea != NULL) {
+                    lv_textarea_set_text(g_ui.wifi_ssid_textarea, (const char *)g_wifi_aps[0].ssid);
+                }
+                refresh_wifi_widgets_locked();
+                bsp_display_unlock();
+            }
+            update_activity_from_task("Wi-Fi Scan", ap_count > 0 ? "Select a network, then connect." : "No networks found.");
+        }
+    }
+
+    if (err != ESP_OK) {
+        g_wifi_last_error = err;
+        g_wifi_state = WIFI_STATE_ERROR;
+        ESP_LOGW(TABFORGE_TAG, "wifi scan failed: %s", esp_err_to_name(err));
+        update_activity_from_task("Wi-Fi Scan", esp_err_to_name(err));
+    }
+
+    vTaskDelete(NULL);
+}
+
+static void wifi_connect_task(void *arg)
+{
+    (void)arg;
+    if (!g_wifi_started) {
+        g_wifi_state = WIFI_STATE_ERROR;
+        g_wifi_last_error = ESP_ERR_INVALID_STATE;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (g_wifi_ap_count > 0 && g_wifi_credentials.ssid[0] == '\0') {
+        wifi_ap_record_t *ap = &g_wifi_aps[g_wifi_selected_ap % g_wifi_ap_count];
+        strlcpy(g_wifi_credentials.ssid, (const char *)ap->ssid, sizeof(g_wifi_credentials.ssid));
+        g_wifi_credentials.configured = true;
+        if (ap->authmode != WIFI_AUTH_OPEN && g_wifi_credentials.password[0] == '\0') {
+            g_wifi_state = WIFI_STATE_ERROR;
+            g_wifi_last_error = ESP_ERR_INVALID_ARG;
+            update_activity_from_task("Wi-Fi Password Needed", "Add wifi.ssid and wifi.password to /tabforge/config.json, then connect again.");
+            append_event("wifi_password_needed");
+            vTaskDelete(NULL);
+            return;
+        }
+    }
+
+    if (g_wifi_ap_count > 0 && g_wifi_credentials.ssid[0] != '\0' && g_wifi_credentials.password[0] == '\0') {
+        wifi_ap_record_t *ap = &g_wifi_aps[g_wifi_selected_ap % g_wifi_ap_count];
+        if (strcmp((const char *)ap->ssid, g_wifi_credentials.ssid) == 0 && ap->authmode != WIFI_AUTH_OPEN) {
+            g_wifi_state = WIFI_STATE_ERROR;
+            g_wifi_last_error = ESP_ERR_INVALID_ARG;
+            update_activity_from_task("Wi-Fi Password Needed", "Type the password, then press Connect Wi-Fi.");
+            append_event("wifi_password_needed");
+            vTaskDelete(NULL);
+            return;
+        }
+    }
+
+    if (!g_wifi_credentials.configured || g_wifi_credentials.ssid[0] == '\0') {
+        g_wifi_state = WIFI_STATE_ERROR;
+        g_wifi_last_error = ESP_ERR_NOT_FOUND;
+        update_activity_from_task("Wi-Fi", "No saved SSID. Scan first or add wifi.ssid to config.");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    g_wifi_state = WIFI_STATE_CONNECTING;
+    update_activity_from_task("Wi-Fi Connect", g_wifi_credentials.ssid);
+
+    wifi_config_t wifi_config = {0};
+    strlcpy((char *)wifi_config.sta.ssid, g_wifi_credentials.ssid, sizeof(wifi_config.sta.ssid));
+    strlcpy((char *)wifi_config.sta.password, g_wifi_credentials.password, sizeof(wifi_config.sta.password));
+    wifi_config.sta.threshold.authmode = g_wifi_credentials.password[0] == '\0' ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+
+    esp_wifi_disconnect();
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    if (err == ESP_OK) {
+        err = esp_wifi_connect();
+    }
+    if (err != ESP_OK) {
+        g_wifi_last_error = err;
+        g_wifi_state = WIFI_STATE_ERROR;
+        update_activity_from_task("Wi-Fi Connect", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    uint32_t start_ms = now_ms_u32();
+    while (!g_wifi_has_ip && (uint32_t)(now_ms_u32() - start_ms) < TABFORGE_WIFI_CONNECT_TIMEOUT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+
+    if (!g_wifi_has_ip) {
+        g_wifi_last_error = ESP_ERR_TIMEOUT;
+        g_wifi_state = WIFI_STATE_ERROR;
+        update_activity_from_task("Wi-Fi Connect", "Timed out waiting for IP.");
+    } else {
+        save_wifi_credentials_to_nvs();
+        update_activity_from_task("Wi-Fi Connected", g_wifi_ip);
+    }
+
+    vTaskDelete(NULL);
+}
+
+static esp_err_t http_get_to_buffer(const char *url, char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .timeout_ms = 15000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        esp_http_client_cleanup(client);
+        return err;
+    }
+
+    int content_length = esp_http_client_fetch_headers(client);
+    if (content_length >= (int)buffer_size) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_NO_MEM;
+    }
+
+    int total = 0;
+    while (total < (int)buffer_size - 1) {
+        int read_len = esp_http_client_read(client, buffer + total, (int)buffer_size - 1 - total);
+        if (read_len < 0) {
+            err = ESP_FAIL;
+            break;
+        }
+        if (read_len == 0) {
+            break;
+        }
+        total += read_len;
+    }
+    buffer[total] = '\0';
+
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return (status >= 200 && status < 300) ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t fetch_manifest_firmware_url(void)
+{
+    char *manifest = heap_caps_malloc(TABFORGE_OTA_MANIFEST_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    if (manifest == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = http_get_to_buffer(g_ota_manifest_url, manifest, TABFORGE_OTA_MANIFEST_MAX_BYTES);
+    if (err != ESP_OK) {
+        heap_caps_free(manifest);
+        return err;
+    }
+
+    cJSON *root = cJSON_Parse(manifest);
+    heap_caps_free(manifest);
+    if (root == NULL) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    cJSON *latest = cJSON_GetObjectItemCaseSensitive(root, "latest");
+    cJSON *version = cJSON_IsObject(latest) ? cJSON_GetObjectItemCaseSensitive(latest, "version") : NULL;
+    cJSON *firmware = cJSON_IsObject(latest) ? cJSON_GetObjectItemCaseSensitive(latest, "firmware") : NULL;
+    cJSON *available = cJSON_IsObject(firmware) ? cJSON_GetObjectItemCaseSensitive(firmware, "available") : NULL;
+    cJSON *url = cJSON_IsObject(firmware) ? cJSON_GetObjectItemCaseSensitive(firmware, "url") : NULL;
+
+    if (cJSON_IsString(version) && version->valuestring != NULL) {
+        strlcpy(g_ota_version, version->valuestring, sizeof(g_ota_version));
+    }
+    if (!cJSON_IsTrue(available) || !cJSON_IsString(url) || url->valuestring == NULL || url->valuestring[0] == '\0') {
+        cJSON_Delete(root);
+        return ESP_ERR_NOT_FOUND;
+    }
+    strlcpy(g_ota_firmware_url, url->valuestring, sizeof(g_ota_firmware_url));
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static void ota_update_task(void *arg)
+{
+    (void)arg;
+    if (!g_wifi_has_ip) {
+        g_ota_state = OTA_STATE_ERROR;
+        g_ota_last_error = ESP_ERR_INVALID_STATE;
+        update_activity_from_task("OTA", "Connect Wi-Fi before OTA.");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    g_ota_state = OTA_STATE_FETCHING_MANIFEST;
+    g_ota_last_error = ESP_OK;
+    update_activity_from_task("OTA", "Fetching manifest.");
+    esp_err_t err = fetch_manifest_firmware_url();
+    if (err != ESP_OK) {
+        g_ota_state = OTA_STATE_ERROR;
+        g_ota_last_error = err;
+        update_activity_from_task("OTA Manifest", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    g_ota_state = OTA_STATE_DOWNLOADING;
+    update_activity_from_task("OTA Download", g_ota_version[0] != '\0' ? g_ota_version : g_ota_firmware_url);
+    esp_http_client_config_t http_config = {
+        .url = g_ota_firmware_url,
+        .timeout_ms = 30000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .keep_alive_enable = true,
+    };
+    esp_https_ota_config_t ota_config = {
+        .http_config = &http_config,
+    };
+    err = esp_https_ota(&ota_config);
+    if (err == ESP_OK) {
+        g_ota_state = OTA_STATE_READY_REBOOT;
+        g_ota_reboot_pending = true;
+        append_event("ota_update_ready");
+        update_activity_from_task("OTA Ready", "Firmware written. Reboot from Update page.");
+    } else {
+        g_ota_state = OTA_STATE_ERROR;
+        g_ota_last_error = err;
+        ESP_LOGW(TABFORGE_TAG, "OTA failed: %s", esp_err_to_name(err));
+        update_activity_from_task("OTA Failed", esp_err_to_name(err));
+    }
+
+    vTaskDelete(NULL);
+}
+
+static void wifi_scan_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    xTaskCreate(wifi_scan_task, "tabforge-wifi-scan", 6144, NULL, 5, NULL);
+}
+
+static void wifi_next_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    if (g_wifi_ap_count > 0) {
+        g_wifi_selected_ap = (uint16_t)((g_wifi_selected_ap + 1U) % g_wifi_ap_count);
+        if (g_ui.wifi_ssid_textarea != NULL) {
+            wifi_ap_record_t *ap = &g_wifi_aps[g_wifi_selected_ap % g_wifi_ap_count];
+            lv_textarea_set_text(g_ui.wifi_ssid_textarea, (const char *)ap->ssid);
+        }
+        refresh_wifi_widgets_locked();
+        append_event("wifi_next_ap");
+    }
+}
+
+static void wifi_connect_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    if (g_ui.wifi_ssid_textarea != NULL) {
+        const char *ssid = lv_textarea_get_text(g_ui.wifi_ssid_textarea);
+        strlcpy(g_wifi_credentials.ssid, ssid != NULL ? ssid : "", sizeof(g_wifi_credentials.ssid));
+    }
+    if (g_ui.wifi_password_textarea != NULL) {
+        const char *password = lv_textarea_get_text(g_ui.wifi_password_textarea);
+        strlcpy(g_wifi_credentials.password, password != NULL ? password : "", sizeof(g_wifi_credentials.password));
+    }
+    g_wifi_credentials.configured = g_wifi_credentials.ssid[0] != '\0';
+    g_wifi_credentials.auto_connect = g_wifi_credentials.configured;
+    xTaskCreate(wifi_connect_task, "tabforge-wifi-connect", 6144, NULL, 5, NULL);
+}
+
+static void wifi_textarea_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    lv_obj_t *target = lv_event_get_target(event);
+
+    if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+        if (g_ui.wifi_keyboard != NULL) {
+            lv_keyboard_set_textarea(g_ui.wifi_keyboard, target);
+            lv_obj_clear_flag(g_ui.wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+        if (g_ui.wifi_keyboard != NULL) {
+            lv_obj_add_flag(g_ui.wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void ota_start_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    xTaskCreate(ota_update_task, "tabforge-ota", 8192, NULL, 5, NULL);
+}
+
+static void ota_reboot_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    if (g_ota_reboot_pending) {
+        append_event("ota_reboot");
+        esp_restart();
+    }
+    set_activity("OTA", "No completed OTA is waiting for reboot.");
+}
+
+static void grove_uart_send_line(const char *line)
+{
+    if (!g_grove_uart_ready || line == NULL || line[0] == '\0') {
+        return;
+    }
+    uart_write_bytes(GROVE_UART_NUM, line, strlen(line));
+    uart_write_bytes(GROVE_UART_NUM, "\n", 1);
+    append_event("grove_uart_tx");
+    ESP_LOGI(TABFORGE_TAG, "Grove UART TX: %s", line);
 }
 
 static void mode_button_event_cb(lv_event_t *event)
@@ -1254,9 +2039,14 @@ static void mode_button_event_cb(lv_event_t *event)
 
     g_meshcore_mode = !g_meshcore_mode;
     refresh_mode_widgets();
-    set_activity(active_mode_name(), active_mode_detail());
+    if (g_mesh_module_ready) {
+        set_activity(active_mode_name(), active_mode_detail());
+    } else {
+        set_activity("Mesh profile", selected_mesh_profile_name());
+    }
     append_event(g_meshcore_mode ? "mode_meshcore" : "mode_meshtastic");
-    ESP_LOGI(TABFORGE_TAG, "mode switched to %s", active_mode_name());
+    grove_uart_send_line(g_meshcore_mode ? "help" : "TabForge Meshtastic link test");
+    ESP_LOGI(TABFORGE_TAG, "mesh profile switched to %s", selected_mesh_profile_name());
 }
 
 static void auto_rotate_button_event_cb(lv_event_t *event)
@@ -1296,6 +2086,24 @@ static void sleep_button_event_cb(lv_event_t *event)
     set_activity("Sleep", "Display sleep active. Touch the screen to wake.");
     refresh_screen_widgets_locked();
     enter_screen_sleep("screen_sleep_button");
+}
+
+static void accessory_power_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    bool enable = !(g_ext_power_ready || g_usb_power_ready);
+    set_accessory_power(enable);
+    if (enable) {
+        start_accessory_probe_tasks();
+    }
+    refresh_accessory_widgets_locked();
+    refresh_live_stats_locked();
+    set_activity(enable ? "Accessories On" : "Accessories Off",
+                 enable ? "Add-ons powered after boot." : "Add-on rails powered down.");
+    append_event(enable ? "accessories_power_on" : "accessories_power_off");
 }
 
 static void update_button_event_cb(lv_event_t *event)
@@ -1338,15 +2146,15 @@ static void build_top_bar(lv_obj_t *screen, lv_coord_t width, lv_coord_t height,
     lv_obj_t *top = lv_obj_create(screen);
     lv_obj_remove_style_all(top);
     lv_obj_set_size(top, width, height);
-    lv_obj_set_style_bg_color(top, color_hex(0x090d10), 0);
+    lv_obj_set_style_bg_color(top, color_hex(0x080c0f), 0);
     lv_obj_set_style_bg_opa(top, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_hor(top, 10, 0);
     lv_obj_set_style_pad_ver(top, 6, 0);
     lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    g_ui.status_label = make_text(top, "", 0x6ee7a2, (width * 42) / 100);
-    g_ui.rotation_label = make_text(top, "", 0x93a6ad, (width * 32) / 100);
+    g_ui.status_label = make_text(top, "", 0xf1f7f3, (width * 36) / 100);
+    g_ui.rotation_label = make_text(top, "", 0x93a6ad, (width * 36) / 100);
     lv_obj_set_style_text_align(g_ui.rotation_label, LV_TEXT_ALIGN_RIGHT, 0);
     g_ui.battery_label = make_text(top, "BAT --", 0xffc857, (width * 20) / 100);
     lv_obj_set_style_text_align(g_ui.battery_label, LV_TEXT_ALIGN_RIGHT, 0);
@@ -1354,18 +2162,19 @@ static void build_top_bar(lv_obj_t *screen, lv_coord_t width, lv_coord_t height,
 
 static void build_home_header(lv_obj_t *parent, lv_coord_t width, lv_coord_t height)
 {
-    lv_obj_t *header = make_panel(parent, width, height, 0x10161a, 0x293943);
+    lv_obj_t *header = make_panel(parent, width, height, 0x11191e, 0x263b45);
+    lv_obj_set_style_radius(header, 22, 0);
     lv_obj_set_flex_flow(header, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(header, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(header, 8, 0);
+    lv_obj_set_style_pad_row(header, 5, 0);
 
     g_ui.mode_label = make_text(header, "", 0xf1f7f3, width - 28);
     lv_obj_set_style_text_align(g_ui.mode_label, LV_TEXT_ALIGN_CENTER, 0);
     g_ui.mode_detail_label = make_text(header, "", 0x93a6ad, width - 28);
     lv_obj_set_style_text_align(g_ui.mode_detail_label, LV_TEXT_ALIGN_CENTER, 0);
-    g_ui.activity_title_label = make_text(header, "Home", 0x6ee7a2, width - 28);
+    g_ui.activity_title_label = make_text(header, "Home", 0x70a7ff, width - 28);
     lv_obj_set_style_text_align(g_ui.activity_title_label, LV_TEXT_ALIGN_CENTER, 0);
-    g_ui.activity_detail_label = make_text(header, "Tap an app icon or bottom control.", 0xf1f7f3, width - 28);
+    g_ui.activity_detail_label = make_text(header, "Ready", 0xf1f7f3, width - 28);
     lv_obj_set_style_text_align(g_ui.activity_detail_label, LV_TEXT_ALIGN_CENTER, 0);
     g_ui.gyro_label = make_text(header, "gyro pending", 0x61d5f0, width - 28);
     lv_obj_set_style_text_align(g_ui.gyro_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -1388,11 +2197,11 @@ static void build_quick_status(lv_obj_t *parent, lv_coord_t width, lv_coord_t he
         card_h = 56;
     }
 
-    add_stat_card(stat_grid, "Uptime", &g_ui.uptime_label, NULL, card_w, card_h, 0x43d17a);
-    add_stat_card(stat_grid, "SD", &g_ui.sd_label, NULL, card_w, card_h, 0xff7a66);
-    add_stat_card(stat_grid, "USB", &g_ui.usb_label, NULL, card_w, card_h, 0x70a7ff);
+    add_stat_card(stat_grid, "Wi-Fi", &g_ui.wifi_label, NULL, card_w, card_h, 0x70a7ff);
+    add_stat_card(stat_grid, "Battery", &g_ui.battery_card_label, NULL, card_w, card_h, 0xffc857);
     add_stat_card(stat_grid, "Mic", &g_ui.mic_label, &g_ui.mic_bar, card_w, card_h, 0xb982ff);
-    add_stat_card(stat_grid, "Add-ons", &g_ui.addon_label, NULL, card_w, card_h, 0xffc857);
+    add_stat_card(stat_grid, "SD", &g_ui.sd_label, NULL, card_w, card_h, 0xff7a66);
+    add_stat_card(stat_grid, "Uptime", &g_ui.uptime_label, NULL, card_w, card_h, 0x43d17a);
     add_stat_card(stat_grid, "Screen", &g_ui.screen_label, NULL, card_w, card_h, 0x77dd88);
 }
 
@@ -1407,14 +2216,14 @@ static void build_app_grid(lv_obj_t *parent, lv_coord_t width, lv_coord_t height
     lv_obj_set_style_pad_row(grid, 14, 0);
     lv_obj_set_style_pad_column(grid, 14, 0);
 
-    lv_coord_t columns = landscape ? 4 : 4;
+    lv_coord_t columns = landscape ? 6 : 4;
     lv_coord_t tile_w = (width - ((columns - 1) * 14)) / columns;
     lv_coord_t tile_h = (height - 18) / 2;
-    if (tile_h > 144) {
-        tile_h = 144;
+    if (tile_h > 118) {
+        tile_h = 118;
     }
-    if (tile_h < 112) {
-        tile_h = 112;
+    if (tile_h < 92) {
+        tile_h = 92;
     }
     for (size_t i = 0; i < sizeof(g_tiles) / sizeof(g_tiles[0]); ++i) {
         add_app_tile(grid, &g_tiles[i], tile_w, tile_h);
@@ -1458,7 +2267,7 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
     lv_obj_set_flex_align(page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(page, 10, 0);
 
-    lv_coord_t controls_h = landscape ? 56 : 162;
+    lv_coord_t controls_h = landscape ? 164 : 216;
     lv_obj_t *controls = lv_obj_create(page);
     lv_obj_remove_style_all(controls);
     lv_obj_set_size(controls, width, controls_h);
@@ -1468,13 +2277,15 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
     lv_obj_set_style_pad_row(controls, 10, 0);
     lv_obj_set_style_pad_column(controls, 10, 0);
 
-    lv_coord_t control_cols = landscape ? 5 : 2;
+    lv_coord_t control_cols = landscape ? 3 : 2;
     lv_coord_t control_w = (width - ((control_cols - 1) * 10)) / control_cols;
-    make_button(controls, control_w, "Mode Profile", mode_button_event_cb);
+    make_button(controls, control_w, "Wi-Fi & Internet", update_button_event_cb);
+    make_button(controls, control_w, "Display", screen_timeout_button_event_cb);
+    make_button(controls, control_w, "Sleep Now", sleep_button_event_cb);
+    make_button(controls, control_w, "Mesh Profile", mode_button_event_cb);
+    make_button(controls, control_w, "Accessories", accessory_power_button_event_cb);
     make_button(controls, control_w, "Auto Rotate", auto_rotate_button_event_cb);
-    make_button(controls, control_w, "Timeout", screen_timeout_button_event_cb);
-    make_button(controls, control_w, "Sleep", sleep_button_event_cb);
-    make_button(controls, control_w, "Update Center", update_button_event_cb);
+    make_button(controls, control_w, "OTA Update", update_button_event_cb);
 
     lv_obj_t *grid = lv_obj_create(page);
     lv_obj_remove_style_all(grid);
@@ -1490,11 +2301,10 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
     lv_coord_t card_h = landscape ? 86 : 96;
     char sd_value[48];
     char rotation_value[48];
-    char power_value[64];
-    char usb_value[48];
-    char grove_value[48];
     char battery_value[48];
     char screen_value[48];
+    char wifi_value[96];
+    char accessory_value[64];
 
     snprintf(sd_value, sizeof(sd_value), "%s",
              g_sd_ready ? (g_sd_recovered ? "recovered" : "mounted") : esp_err_to_name(g_sd_last_error));
@@ -1502,42 +2312,82 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
              g_auto_rotate ? "Auto" : "Locked",
              rotation_degrees(g_rotation));
     format_battery_status(battery_value, sizeof(battery_value), false);
-    snprintf(power_value, sizeof(power_value), "PA %s | USB %s | CHG %s",
-             g_ext_power_ready ? "on" : "err",
-             g_usb_power_ready ? "on" : "err",
-             g_charge_enable_ready ? "on" : "err");
-    snprintf(usb_value, sizeof(usb_value), "%s | 5V %s",
-             usb_state_text(),
-             g_usb_power_ready ? "on" : esp_err_to_name(g_usb_power_error));
-    snprintf(grove_value, sizeof(grove_value), "UART %s | IR %s",
-             g_grove_uart_ready ? "ready" : "wait",
-             g_ir_probe_ready ? "ready" : "wait");
     format_screen_status(screen_value, sizeof(screen_value));
+    format_wifi_status(wifi_value, sizeof(wifi_value));
+    format_accessory_status(accessory_value, sizeof(accessory_value));
 
+    g_ui.wifi_label = add_info_tile(grid, "Wi-Fi & Internet", wifi_value, "Tap Wi-Fi & Internet above to scan, type a password, and connect.", card_w, card_h, 0x70a7ff);
+    g_ui.accessory_label = add_info_tile(grid, "Accessories", accessory_value, "Tap Accessories after boot to power Grove/PA and USB-A add-ons.", card_w, card_h, 0x43d17a);
     add_info_tile(grid, "SD", sd_value, "Creates /tabforge config, logs, audio, backups, and IR folders.", card_w, card_h, 0x61d5f0);
     g_ui.settings_screen_label = add_info_tile(grid, "Display", screen_value, "Timeout button cycles values; Sleep turns display off.", card_w, card_h, 0x77dd88);
     add_info_tile(grid, "Rotation", rotation_value, "Gyro auto-rotate can be locked from the dock.", card_w, card_h, 0x77dd88);
-    add_info_tile(grid, "Power", power_value, battery_value, card_w, card_h, 0xffc857);
-    add_info_tile(grid, "USB Host", usb_value, "CDC serial scanner for C6L and T-Deck links.", card_w, card_h, 0x70a7ff);
-    add_info_tile(grid, "Grove / IR", grove_value, "GPIO54 RX and GPIO53 TX are armed.", card_w, card_h, 0xff7a66);
+    add_info_tile(grid, "Battery", battery_value, "Runtime and charge state.", card_w, card_h, 0xffc857);
+    add_info_tile(grid, "Updates", ota_state_text(), "Internet OTA uses Wi-Fi.", card_w, card_h, 0xffc857);
 }
 
 static void build_update_page(lv_obj_t *page, lv_coord_t width, lv_coord_t height, bool landscape)
 {
-    (void)landscape;
-
     lv_obj_t *card = make_panel(page, width, height, 0x10161a, 0xffc857);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(card, 10, 0);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(card, 8, 0);
 
-    make_text(card, "Stable OTA", 0xffc857, width - 32);
-    make_text(card, TABFORGE_VERSION, 0xf1f7f3, width - 32);
-    make_text(card, TABFORGE_MANIFEST_URL, 0x93a6ad, width - 32);
-    make_text(card, "The on-device update flow uses this manifest and requires a physical confirmation button before writing OTA flash.", 0xf1f7f3, width - 32);
+    char wifi_value[96];
+    char scan_value[96];
+    format_wifi_status(wifi_value, sizeof(wifi_value));
+    format_wifi_scan_status(scan_value, sizeof(scan_value));
 
-    lv_coord_t button_w = width > 360 ? 320 : width - 32;
-    make_button(card, button_w, "Select Stable Manifest", update_button_event_cb);
+    make_text(card, "Wi-Fi + OTA", 0xffc857, width - 32);
+    g_ui.wifi_label = make_text(card, wifi_value, 0xf1f7f3, width - 32);
+    g_ui.wifi_scan_label = make_text(card, scan_value, 0x93a6ad, width - 32);
+    g_ui.ota_label = make_text(card, g_ota_manifest_url, 0x93a6ad, width - 32);
+
+    g_ui.wifi_ssid_textarea = lv_textarea_create(card);
+    lv_obj_set_size(g_ui.wifi_ssid_textarea, width - 32, 42);
+    lv_textarea_set_one_line(g_ui.wifi_ssid_textarea, true);
+    lv_textarea_set_max_length(g_ui.wifi_ssid_textarea, TABFORGE_WIFI_MAX_SSID - 1);
+    lv_textarea_set_placeholder_text(g_ui.wifi_ssid_textarea, "Wi-Fi name");
+    lv_textarea_set_text(g_ui.wifi_ssid_textarea, g_wifi_credentials.ssid);
+    lv_obj_set_style_radius(g_ui.wifi_ssid_textarea, 8, 0);
+    lv_obj_set_style_bg_color(g_ui.wifi_ssid_textarea, color_hex(0x172126), 0);
+    lv_obj_set_style_text_color(g_ui.wifi_ssid_textarea, color_hex(0xf1f7f3), 0);
+    lv_obj_set_style_border_color(g_ui.wifi_ssid_textarea, color_hex(0x3c525a), 0);
+    lv_obj_add_event_cb(g_ui.wifi_ssid_textarea, wifi_textarea_event_cb, LV_EVENT_ALL, NULL);
+
+    g_ui.wifi_password_textarea = lv_textarea_create(card);
+    lv_obj_set_size(g_ui.wifi_password_textarea, width - 32, 42);
+    lv_textarea_set_one_line(g_ui.wifi_password_textarea, true);
+    lv_textarea_set_password_mode(g_ui.wifi_password_textarea, true);
+    lv_textarea_set_max_length(g_ui.wifi_password_textarea, TABFORGE_WIFI_MAX_PASSWORD - 1);
+    lv_textarea_set_placeholder_text(g_ui.wifi_password_textarea, "Password");
+    lv_textarea_set_text(g_ui.wifi_password_textarea, g_wifi_credentials.password);
+    lv_obj_set_style_radius(g_ui.wifi_password_textarea, 8, 0);
+    lv_obj_set_style_bg_color(g_ui.wifi_password_textarea, color_hex(0x172126), 0);
+    lv_obj_set_style_text_color(g_ui.wifi_password_textarea, color_hex(0xf1f7f3), 0);
+    lv_obj_set_style_border_color(g_ui.wifi_password_textarea, color_hex(0x3c525a), 0);
+    lv_obj_add_event_cb(g_ui.wifi_password_textarea, wifi_textarea_event_cb, LV_EVENT_ALL, NULL);
+
+    lv_coord_t button_w = landscape ? (width - 54) / 3 : width - 32;
+    lv_obj_t *buttons = lv_obj_create(card);
+    lv_obj_remove_style_all(buttons);
+    lv_obj_set_size(buttons, width - 24, landscape ? 102 : 272);
+    lv_obj_clear_flag(buttons, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(buttons, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(buttons, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(buttons, 10, 0);
+    lv_obj_set_style_pad_column(buttons, 10, 0);
+
+    make_button(buttons, button_w, "Scan Wi-Fi", wifi_scan_button_event_cb);
+    make_button(buttons, button_w, "Next Network", wifi_next_button_event_cb);
+    make_button(buttons, button_w, "Connect Wi-Fi", wifi_connect_button_event_cb);
+    make_button(buttons, button_w, "Run Internet OTA", ota_start_button_event_cb);
+    make_button(buttons, button_w, "Reboot After OTA", ota_reboot_button_event_cb);
+
+    g_ui.wifi_keyboard = lv_keyboard_create(card);
+    lv_obj_set_size(g_ui.wifi_keyboard, width - 32, landscape ? 150 : 180);
+    lv_keyboard_set_mode(g_ui.wifi_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_obj_add_flag(g_ui.wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void build_pages(lv_obj_t *parent, lv_coord_t width, lv_coord_t height, bool landscape)
@@ -1566,11 +2416,11 @@ static void build_body(lv_obj_t *screen, lv_coord_t width, lv_coord_t height, bo
     lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(body, 12, 0);
 
-    lv_coord_t header_h = landscape ? 136 : 210;
-    lv_coord_t quick_h = landscape ? 76 : 128;
+    lv_coord_t header_h = landscape ? 106 : 148;
+    lv_coord_t quick_h = landscape ? 72 : 118;
     lv_coord_t apps_h = height - header_h - quick_h - 24;
-    if (apps_h < 240) {
-        apps_h = 240;
+    if (apps_h < 220) {
+        apps_h = 220;
     }
 
     build_home_header(body, width, header_h);
@@ -1581,17 +2431,19 @@ static void build_body(lv_obj_t *screen, lv_coord_t width, lv_coord_t height, bo
 static void build_dock(lv_obj_t *screen, lv_coord_t width, lv_coord_t height)
 {
     lv_obj_t *dock = make_panel(screen, width, height, 0x11171c, 0x26333b);
+    lv_obj_set_style_radius(dock, 24, 0);
+    lv_obj_set_style_bg_opa(dock, LV_OPA_90, 0);
     lv_obj_clear_flag(dock, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(dock, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(dock, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(dock, 10, 0);
+    lv_obj_set_style_pad_all(dock, 8, 0);
 
-    lv_coord_t button_w = (width - 80) / 5;
-    g_ui.nav_apps = make_nav_button(dock, button_w, LV_SYMBOL_LIST, "Apps", apps_button_event_cb);
+    lv_coord_t button_w = (width - 64) / 5;
+    g_ui.nav_apps = make_nav_button(dock, button_w, LV_SYMBOL_LIST, "Home", apps_button_event_cb);
     g_ui.nav_settings = make_nav_button(dock, button_w, LV_SYMBOL_SETTINGS, "Settings", settings_button_event_cb);
-    g_ui.nav_mode = make_nav_button(dock, button_w, LV_SYMBOL_SHUFFLE, "Core", mode_button_event_cb);
+    g_ui.nav_mode = make_nav_button(dock, button_w, LV_SYMBOL_SHUFFLE, "Mesh", mode_button_event_cb);
     g_ui.nav_auto = make_nav_button(dock, button_w, LV_SYMBOL_REFRESH, "Auto", auto_rotate_button_event_cb);
-    g_ui.nav_update = make_nav_button(dock, button_w, LV_SYMBOL_DOWNLOAD, "OTA", update_button_event_cb);
+    g_ui.nav_update = make_nav_button(dock, button_w, LV_SYMBOL_WIFI, "Wi-Fi", update_button_event_cb);
 
     g_ui.dock_mode_label = g_ui.nav_mode.label;
     g_ui.dock_auto_label = g_ui.nav_auto.label;
@@ -1605,10 +2457,10 @@ static void build_dashboard(lv_obj_t *screen)
     bool landscape = is_landscape_rotation(g_rotation);
     lv_coord_t screen_w = (lv_coord_t)deck_width();
     lv_coord_t screen_h = (lv_coord_t)deck_height();
-    lv_coord_t pad = landscape ? 16 : 12;
-    lv_coord_t gap = landscape ? 12 : 10;
-    lv_coord_t top_h = landscape ? 46 : 48;
-    lv_coord_t dock_h = landscape ? 96 : 104;
+    lv_coord_t pad = landscape ? 14 : 10;
+    lv_coord_t gap = landscape ? 10 : 8;
+    lv_coord_t top_h = landscape ? 38 : 42;
+    lv_coord_t dock_h = landscape ? 82 : 88;
     lv_coord_t content_w = screen_w - (pad * 2);
     lv_coord_t body_h = screen_h - (pad * 2) - top_h - dock_h - (gap * 2);
 
@@ -1638,7 +2490,10 @@ static bool target_rotation_from_accel(lv_disp_rotation_t *target)
     float ay = g_last_acce.y;
     float abs_x = axis_abs(ax);
     float abs_y = axis_abs(ay);
-    if (abs_x < 0.65f && abs_y < 0.65f) {
+    if (abs_x < 0.45f && abs_y < 0.45f) {
+        return false;
+    }
+    if (axis_abs(abs_x - abs_y) < 0.12f) {
         return false;
     }
 
@@ -1685,7 +2540,7 @@ static void maybe_apply_auto_rotation_locked(void)
         return;
     }
 
-    if (g_pending_rotation_count < 3) {
+    if (g_pending_rotation_count < ROTATION_CONFIRM_SAMPLES) {
         g_pending_rotation_count++;
         return;
     }
@@ -1757,6 +2612,19 @@ static void check_screen_power_locked(void)
         return;
     }
 
+    if (g_screen_dimmed) {
+        if (lv_display_get_inactive_time(g_display) < 1000U) {
+            exit_screen_dim("screen_touch_undim");
+            refresh_screen_widgets_locked();
+            return;
+        }
+        if ((uint32_t)(now_ms - g_screen_dim_start_ms) >= TABFORGE_SCREEN_DIM_GRACE_MS) {
+            enter_screen_sleep("screen_timeout_sleep");
+            refresh_screen_widgets_locked();
+        }
+        return;
+    }
+
     uint32_t timeout_seconds = screen_timeout_seconds();
     if (timeout_seconds == 0) {
         return;
@@ -1764,7 +2632,7 @@ static void check_screen_power_locked(void)
 
     uint32_t inactive_ms = lv_display_get_inactive_time(g_display);
     if (inactive_ms >= (timeout_seconds * 1000U)) {
-        enter_screen_sleep("screen_timeout_sleep");
+        enter_screen_dim("screen_timeout_dim");
         refresh_screen_widgets_locked();
     }
 }
@@ -1784,7 +2652,7 @@ static void init_imu(void)
         return;
     }
 
-    err = iot_sensor_handler_register(g_imu_sensor_handle, sensor_event_handler, NULL);
+    err = iot_sensor_handler_register(g_imu_sensor_handle, sensor_event_handler, &g_imu_handler_instance);
     if (err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "IMU handler register failed: %s", esp_err_to_name(err));
         return;
@@ -1823,6 +2691,45 @@ static void init_network_stack(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 }
 
+static void init_wifi_station(void)
+{
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_err_t err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+        g_wifi_state = WIFI_STATE_ERROR;
+        g_wifi_last_error = err;
+        ESP_LOGW(TABFORGE_TAG, "wifi init failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, NULL);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL, NULL);
+
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err == ESP_OK) {
+        err = esp_wifi_start();
+    }
+    if (err != ESP_OK) {
+        g_wifi_state = WIFI_STATE_ERROR;
+        g_wifi_last_error = err;
+        ESP_LOGW(TABFORGE_TAG, "wifi start failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    g_wifi_started = true;
+    g_wifi_state = WIFI_STATE_READY;
+    append_event("wifi_station_started");
+    ESP_LOGI(TABFORGE_TAG, "wifi station ready");
+
+    if (g_wifi_credentials.auto_connect && g_wifi_credentials.configured) {
+        xTaskCreate(wifi_connect_task, "tabforge-wifi-autoconnect", 6144, NULL, 5, NULL);
+    } else if (!g_wifi_boot_scan_started) {
+        g_wifi_boot_scan_started = true;
+        xTaskCreate(wifi_scan_task, "tabforge-wifi-boot-scan", 6144, NULL, 5, NULL);
+    }
+}
+
 static void log_boot_status(void)
 {
     const esp_app_desc_t *desc = esp_app_get_description();
@@ -1834,44 +2741,48 @@ static void log_boot_status(void)
     ESP_LOGI(TABFORGE_TAG, "Event log: %s", TABFORGE_EVENT_LOG_PATH);
 }
 
-static void init_expansion_power(void)
+static void init_power_management(void)
 {
     esp_io_expander_handle_t io_expander = bsp_io_expander_init();
     if (io_expander == NULL) {
         g_ext_power_ready = false;
-        g_ext_power_error = ESP_FAIL;
-        ESP_LOGW(TABFORGE_TAG, "PA/Grove 5V enable failed: IO expander unavailable");
+        g_ext_power_error = ESP_ERR_NOT_SUPPORTED;
     } else {
-        esp_err_t err = set_expander_output(io_expander, TABFORGE_EXT5V_EN, true);
+        esp_err_t err = set_expander_output(io_expander, TABFORGE_EXT5V_EN, false);
         g_ext_power_error = err;
-        g_ext_power_ready = (err == ESP_OK);
-
-        if (g_ext_power_ready) {
-            ESP_LOGI(TABFORGE_TAG, "PA/Grove 5V enabled for M5-Bus/Grove/GPIO_EXT");
-            append_event("expansion_5v_enabled");
+        g_ext_power_ready = false;
+        if (err == ESP_OK) {
+            ESP_LOGI(TABFORGE_TAG, "PA/Grove add-on rail left off");
         } else {
-            ESP_LOGW(TABFORGE_TAG, "PA/Grove 5V enable failed: %s", esp_err_to_name(err));
+            ESP_LOGW(TABFORGE_TAG, "PA/Grove add-on rail control failed: %s", esp_err_to_name(err));
         }
     }
 
     esp_io_expander_handle_t power_expander = bsp_io_expander1_init();
     if (power_expander == NULL) {
         g_usb_power_ready = false;
-        g_usb_power_error = ESP_FAIL;
+        g_usb_power_error = ESP_ERR_NOT_SUPPORTED;
         g_charge_enable_ready = false;
         g_charge_enable_error = ESP_FAIL;
-        ESP_LOGW(TABFORGE_TAG, "USB-A 5V enable failed: power IO expander unavailable");
+        ESP_LOGW(TABFORGE_TAG, "power IO expander unavailable");
         return;
     }
 
-    esp_err_t usb_err = set_expander_output(power_expander, BSP_USB_EN, true);
+    esp_err_t usb_err = set_expander_output(power_expander, BSP_USB_EN, false);
     g_usb_power_error = usb_err;
-    g_usb_power_ready = (usb_err == ESP_OK);
-    if (g_usb_power_ready) {
-        ESP_LOGI(TABFORGE_TAG, "USB-A 5V enabled for attached USB add-ons");
-        append_event("usb_5v_enabled");
+    g_usb_power_ready = false;
+    if (usb_err == ESP_OK) {
+        ESP_LOGI(TABFORGE_TAG, "USB-A add-on rail left off");
     } else {
-        ESP_LOGW(TABFORGE_TAG, "USB-A 5V enable failed: %s", esp_err_to_name(usb_err));
+        ESP_LOGW(TABFORGE_TAG, "USB-A add-on rail control failed: %s", esp_err_to_name(usb_err));
+    }
+
+    esp_err_t wifi_power_err = set_expander_output(power_expander, BSP_WIFI_EN, true);
+    if (wifi_power_err == ESP_OK) {
+        ESP_LOGI(TABFORGE_TAG, "Wi-Fi co-processor rail enabled");
+        vTaskDelay(pdMS_TO_TICKS(250));
+    } else {
+        ESP_LOGW(TABFORGE_TAG, "Wi-Fi co-processor rail enable failed: %s", esp_err_to_name(wifi_power_err));
     }
 
     esp_err_t charge_err = set_expander_output(power_expander, TABFORGE_CHARGE_ENABLE, true);
@@ -1944,7 +2855,7 @@ static void init_grove_uart_probe(void)
     err = uart_param_config(GROVE_UART_NUM, &uart_config);
     if (err == ESP_OK) {
         err = uart_set_pin(GROVE_UART_NUM,
-                           UART_PIN_NO_CHANGE,
+                           (int)TABFORGE_GROVE_TX_GPIO,
                            (int)TABFORGE_GROVE_RX_GPIO,
                            UART_PIN_NO_CHANGE,
                            UART_PIN_NO_CHANGE);
@@ -1954,50 +2865,12 @@ static void init_grove_uart_probe(void)
     g_grove_uart_ready = (err == ESP_OK);
     if (g_grove_uart_ready) {
         append_event("grove_uart_rx_started");
-        ESP_LOGI(TABFORGE_TAG, "Grove UART passive RX ready on GPIO%u at %u baud",
+        ESP_LOGI(TABFORGE_TAG, "Grove UART ready on RX GPIO%u TX GPIO%u at %u baud",
                  (unsigned)TABFORGE_GROVE_RX_GPIO,
+                 (unsigned)TABFORGE_GROVE_TX_GPIO,
                  (unsigned)GROVE_UART_BAUDRATE);
     } else {
         ESP_LOGW(TABFORGE_TAG, "Grove UART RX config failed: %s", esp_err_to_name(err));
-    }
-}
-
-static bool usb_cdc_rx_cb(const uint8_t *data, size_t data_len, void *user_arg)
-{
-    (void)data;
-    (void)user_arg;
-
-    g_usb_rx_packets++;
-    g_usb_rx_bytes += (uint32_t)data_len;
-    g_usb_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
-    return true;
-}
-
-static void usb_cdc_event_cb(const cdc_acm_host_dev_event_data_t *event, void *user_ctx)
-{
-    (void)user_ctx;
-    if (event == NULL) {
-        return;
-    }
-
-    switch (event->type) {
-    case CDC_ACM_HOST_ERROR:
-        g_usb_last_error = event->data.error;
-        g_usb_state = USB_STATE_ERROR;
-        ESP_LOGW(TABFORGE_TAG, "USB CDC error: %s", esp_err_to_name(g_usb_last_error));
-        break;
-    case CDC_ACM_HOST_DEVICE_DISCONNECTED:
-        g_usb_cdc_disconnected = true;
-        g_usb_disconnect_count++;
-        g_usb_state = USB_STATE_DISCONNECTED;
-        ESP_LOGI(TABFORGE_TAG, "USB CDC device disconnected");
-        break;
-    case CDC_ACM_HOST_SERIAL_STATE:
-        ESP_LOGI(TABFORGE_TAG, "USB CDC serial state: 0x%04x", event->data.serial_state.val);
-        break;
-    case CDC_ACM_HOST_NETWORK_CONNECTION:
-    default:
-        break;
     }
 }
 
@@ -2087,108 +2960,35 @@ static void battery_monitor_task(void *arg)
     }
 }
 
-static void ir_probe_task(void *arg)
+static void poll_grove_uart(void)
 {
-    (void)arg;
+    if (!g_grove_uart_ready) {
+        return;
+    }
 
-    init_ir_probe();
-    init_grove_uart_probe();
     uint8_t uart_data[GROVE_UART_READ_CHUNK];
-    while (true) {
-        if (g_grove_uart_ready) {
-            int rx_len = uart_read_bytes(GROVE_UART_NUM, uart_data, sizeof(uart_data), 0);
-            if (rx_len > 0) {
-                g_grove_rx_packets++;
-                g_grove_rx_bytes += (uint32_t)rx_len;
-                g_grove_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
-            }
-        }
-
-        if (g_ir_probe_ready) {
-            int level = gpio_get_level(TABFORGE_IR_RX_GPIO);
-            if (g_ir_level >= 0 && level != g_ir_level) {
-                g_ir_edges++;
-            }
-            g_ir_level = level;
-        }
-        vTaskDelay(pdMS_TO_TICKS(50));
+    int rx_len = uart_read_bytes(GROVE_UART_NUM, uart_data, sizeof(uart_data), 0);
+    if (rx_len > 0) {
+        g_grove_rx_packets++;
+        g_grove_rx_bytes += (uint32_t)rx_len;
+        g_grove_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+        g_mesh_module_ready = true;
+        ESP_LOGI(TABFORGE_TAG, "C6L Grove UART RX %d bytes", rx_len);
     }
 }
 
-static void usb_cdc_task(void *arg)
+static void accessory_auto_power_task(void *arg)
 {
     (void)arg;
 
-    g_usb_state = USB_STATE_POWERED;
-    esp_err_t err = bsp_usb_host_start(BSP_USB_HOST_POWER_MODE_USB_DEV, true);
-    if (err != ESP_OK) {
-        g_usb_last_error = err;
-        g_usb_state = USB_STATE_ERROR;
-        ESP_LOGW(TABFORGE_TAG, "USB host start failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
-        return;
+    vTaskDelay(pdMS_TO_TICKS(15000));
+    if (!g_ext_power_ready && !g_usb_power_ready) {
+        set_accessory_power(true);
+        start_accessory_probe_tasks();
+        append_event("accessories_auto_power_on");
+        update_activity_from_task("Accessories On", "Add-on power enabled after boot.");
     }
-
-    g_usb_host_ready = true;
-    append_event("usb_host_started");
-    ESP_LOGI(TABFORGE_TAG, "USB host power/library started");
-
-    err = cdc_acm_host_install(NULL);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        g_usb_last_error = err;
-        g_usb_state = USB_STATE_ERROR;
-        ESP_LOGW(TABFORGE_TAG, "USB CDC host install failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
-        return;
-    }
-
-    const cdc_acm_line_coding_t line_coding = {
-        .dwDTERate = USB_CDC_BAUDRATE,
-        .bCharFormat = 0,
-        .bParityType = 0,
-        .bDataBits = 8,
-    };
-
-    while (true) {
-        if (g_usb_cdc_handle != NULL) {
-            if (g_usb_cdc_disconnected) {
-                cdc_acm_host_close(g_usb_cdc_handle);
-                g_usb_cdc_handle = NULL;
-                g_usb_cdc_disconnected = false;
-                g_usb_state = USB_STATE_SCANNING;
-            }
-            vTaskDelay(pdMS_TO_TICKS(500));
-            continue;
-        }
-
-        g_usb_state = USB_STATE_SCANNING;
-        cdc_acm_host_device_config_t dev_config = {
-            .connection_timeout_ms = USB_CDC_SCAN_TIMEOUT_MS,
-            .out_buffer_size = 512,
-            .in_buffer_size = 512,
-            .event_cb = usb_cdc_event_cb,
-            .data_cb = usb_cdc_rx_cb,
-            .user_arg = NULL,
-        };
-
-        err = cdc_acm_host_open(CDC_HOST_ANY_VID, CDC_HOST_ANY_PID, 0, &dev_config, &g_usb_cdc_handle);
-        if (err == ESP_OK) {
-            g_usb_state = USB_STATE_OPEN;
-            g_usb_last_error = ESP_OK;
-            g_usb_open_count++;
-            cdc_acm_host_line_coding_set(g_usb_cdc_handle, &line_coding);
-            cdc_acm_host_set_control_line_state(g_usb_cdc_handle, true, true);
-            cdc_acm_host_desc_print(g_usb_cdc_handle);
-            append_event("usb_cdc_open");
-            ESP_LOGI(TABFORGE_TAG, "USB CDC device opened at %u baud", (unsigned)USB_CDC_BAUDRATE);
-        } else {
-            g_usb_last_error = err;
-            if (err != ESP_ERR_NOT_FOUND && err != ESP_ERR_TIMEOUT) {
-                ESP_LOGW(TABFORGE_TAG, "USB CDC open failed: %s", esp_err_to_name(err));
-            }
-            vTaskDelay(pdMS_TO_TICKS(1200));
-        }
-    }
+    vTaskDelete(NULL);
 }
 
 static void stats_task(void *arg)
@@ -2197,12 +2997,25 @@ static void stats_task(void *arg)
 
     while (true) {
         if (bsp_display_lock(1000)) {
-            maybe_apply_auto_rotation_locked();
             check_screen_power_locked();
             refresh_live_stats_locked();
             bsp_display_unlock();
         }
         vTaskDelay(pdMS_TO_TICKS(STATS_REFRESH_MS));
+    }
+}
+
+static void rotation_task(void *arg)
+{
+    (void)arg;
+
+    while (true) {
+        poll_grove_uart();
+        if (bsp_display_lock(100)) {
+            maybe_apply_auto_rotation_locked();
+            bsp_display_unlock();
+        }
+        vTaskDelay(pdMS_TO_TICKS(ROTATION_CHECK_MS));
     }
 }
 
@@ -2213,24 +3026,21 @@ static void heartbeat_task(void *arg)
     while (true) {
         char battery_status[32];
         format_battery_status(battery_status, sizeof(battery_status), false);
-        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s screen=%s timeout=%s sleeps=%lu pa5v=%s usb5v=%s charge=%s bat=%s usb=%s usb_rx=%lu grove_rx=%lu/%lu ir_edges=%lu rotation=%s",
+        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s usb=%s grove=%s ir=%s screen=%s timeout=%s sleeps=%lu charge=%s bat=%s wifi=%s rotation=%s",
                  (unsigned long)g_heartbeat_count++,
                  active_mode_name(),
                  g_sd_ready ? (g_sd_recovered ? "recovered" : "ready") : "missing",
                  g_imu_ready ? "ready" : "pending",
                  mic_state_text(),
+                 usb_state_text(),
+                 g_grove_uart_ready ? "rx-ready" : "off",
+                 g_ir_probe_ready ? "ready" : "off",
                  g_screen_sleeping ? "sleep" : "awake",
                  screen_timeout_label(),
                  (unsigned long)g_screen_sleep_count,
-                 g_ext_power_ready ? "on" : "err",
-                 g_usb_power_ready ? "on" : "err",
                  g_charge_enable_ready ? "on" : "err",
                  battery_status,
-                 usb_state_text(),
-                 (unsigned long)g_usb_rx_bytes,
-                 (unsigned long)g_grove_rx_bytes,
-                 (unsigned long)g_grove_rx_packets,
-                 (unsigned long)g_ir_edges,
+                 wifi_state_text(),
                  rotation_name(g_rotation));
         append_event("heartbeat");
         vTaskDelay(pdMS_TO_TICKS(30000));
@@ -2244,7 +3054,8 @@ void app_main(void)
     init_network_stack();
     log_boot_status();
     init_sdcard();
-    init_expansion_power();
+    load_runtime_config();
+    init_power_management();
     init_battery_monitor();
 
     g_display = bsp_display_start();
@@ -2262,12 +3073,13 @@ void app_main(void)
         bsp_display_unlock();
     }
 
+    init_wifi_station();
     init_imu();
 
-    xTaskCreate(usb_cdc_task, "tabforge-usb-cdc", 8192, NULL, 6, NULL);
-    xTaskCreate(ir_probe_task, "tabforge-ir-probe", 4096, NULL, 4, NULL);
     xTaskCreate(battery_monitor_task, "tabforge-battery", 4096, NULL, 4, NULL);
     xTaskCreate(heartbeat_task, "tabforge-heartbeat", 4096, NULL, 5, NULL);
     xTaskCreate(mic_monitor_task, "tabforge-mic-monitor", 6144, NULL, 4, NULL);
+    xTaskCreate(accessory_auto_power_task, "tabforge-accessory-power", 3072, NULL, 4, NULL);
     xTaskCreate(stats_task, "tabforge-stats", 6144, NULL, 4, NULL);
+    xTaskCreate(rotation_task, "tabforge-rotate", 4096, NULL, 4, NULL);
 }

@@ -4,6 +4,11 @@
   "operatorLabel": "Tab5",
   "defaultMode": "meshtastic",
   "updateChannel": "stable",
+  "wifi": {
+    "ssid": "",
+    "password": "",
+    "autoConnect": false
+  },
   "devices": {
     "unit-c6l": {
       "enabled": true,

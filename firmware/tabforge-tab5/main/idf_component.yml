@@ -5,4 +5,5 @@ targets:
 dependencies:
   idf: ">=5.4"
   espressif/m5stack_tab5: "*"
-  espressif/usb_host_cdc_acm: "^2"
+  espressif/esp_hosted: "^2.12"
+  espressif/esp_wifi_remote: "^1.6"
