@@ -356,6 +356,7 @@ static bool g_imu_online;
 static bool g_imu_ready;
 
 static void render_active_app_page_locked(void);
+static void init_ir_probe(void);
 static void init_grove_uart_probe(void);
 static void poll_grove_uart(void);
 static axis3_t g_last_acce;
