@@ -77,6 +77,7 @@
 #define TABFORGE_SD_ROOT BSP_SD_MOUNT_POINT
 #define TABFORGE_CONFIG_PATH TABFORGE_SD_ROOT "/tabforge/config.json"
 #define TABFORGE_EVENT_LOG_PATH TABFORGE_SD_ROOT "/tabforge/logs/events.jsonl"
+#define TABFORGE_MESH_LOG_PATH TABFORGE_SD_ROOT "/tabforge/mesh/messages.jsonl"
 #define TABFORGE_MANIFEST_URL "https://its-ze.github.io/tabforge-cyberdeck/manifest.json"
 
 #define IMU_SAMPLE_PERIOD_MS 100
@@ -127,6 +128,10 @@
 #define TABFORGE_OTA_MANIFEST_MAX_BYTES 8192
 #define TABFORGE_OTA_HTTP_CHUNK_SIZE 4096
 #define TABFORGE_PAHUB_I2C_ADDR 0x70
+#define TABFORGE_MESH_MAX_CHANNELS 4
+#define TABFORGE_MESH_MAX_NODES 6
+#define TABFORGE_MESH_MAX_DRAFTS 6
+#define TABFORGE_MESH_PREVIEW_LEN 96
 
 typedef enum {
     FEATURE_ACTIVE,
@@ -261,6 +266,23 @@ typedef struct {
     bool auto_connect;
 } wifi_credentials_t;
 
+typedef struct {
+    const char *name;
+    uint8_t index;
+    const char *role;
+    bool enabled;
+} mesh_channel_t;
+
+typedef struct {
+    const char *name;
+    const char *short_name;
+    const char *node_id;
+    int hop_limit;
+    int battery_percent;
+    bool has_gps;
+    const char *last_seen;
+} mesh_node_t;
+
 static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_WIFI, "Wi-Fi", "Scan, connect, and prepare internet OTA.", "Internet", "tile_wifi", APP_WIFI, FEATURE_ACTIVE, 0x70a7ff},
     {LV_SYMBOL_ENVELOPE, "Messages", "Meshtastic C6L channel text and direct sends.", "Grove", "tile_meshtastic", APP_MESSAGES, FEATURE_ACTIVE, 0x43d17a},
@@ -281,6 +303,31 @@ static const screen_timeout_option_t g_screen_timeouts[] = {
     {"5 min", 300},
 };
 
+static const mesh_channel_t g_mesh_channels[] = {
+    {"LongFast", 0, "Primary", true},
+    {"ITSZPriv", 1, "Private", true},
+    {"LocalOps", 2, "Team", true},
+    {"Telemetry", 3, "Position", true},
+};
+
+static const mesh_node_t g_mesh_nodes[] = {
+    {"Broadcast", "ALL", "^all", 3, -1, false, "now"},
+    {"ITSZ T-Deck", "TDK", "!e072a1ccfe78", 3, 100, true, "USB"},
+    {"Unit C6L", "C6L", "!unit-c6l", 3, -1, false, "Grove"},
+    {"Base LongFast", "BASE", "!2d42b8ad", 3, 101, false, "heard"},
+    {"Field Node", "FLD", "!field", 2, 88, true, "saved"},
+    {"Repeater", "RPT", "!repeat", 5, -1, false, "saved"},
+};
+
+static const char *g_mesh_drafts[] = {
+    "Status green.",
+    "Need assist at my location.",
+    "Checking in from TabForge.",
+    "Can you hear the Tab5?",
+    "Relay this to the team.",
+    "Holding position.",
+};
+
 static ui_refs_t g_ui;
 static lv_display_t *g_display;
 static lv_disp_rotation_t g_rotation = LV_DISPLAY_ROTATION_90;
@@ -292,6 +339,20 @@ static bool g_sd_recovered;
 static esp_err_t g_sd_last_error = ESP_OK;
 static bool g_meshcore_mode;
 static bool g_mesh_module_ready;
+static uint8_t g_mesh_channel_index;
+static uint8_t g_mesh_node_index;
+static uint8_t g_mesh_draft_index;
+static uint32_t g_mesh_saved_node_mask = 0x0000001e;
+static bool g_mesh_gps_share_enabled;
+static bool g_mesh_voice_recording;
+static bool g_mesh_voice_ready;
+static uint32_t g_mesh_sent_count;
+static uint32_t g_mesh_received_count;
+static uint32_t g_mesh_voice_count;
+static uint64_t g_mesh_last_send_ms;
+static char g_mesh_last_sent[TABFORGE_MESH_PREVIEW_LEN] = "none";
+static char g_mesh_last_received[TABFORGE_MESH_PREVIEW_LEN] = "none";
+static char g_mesh_voice_text[TABFORGE_MESH_PREVIEW_LEN] = "Tap Voice to create a voice draft.";
 static nav_page_t g_nav_page = NAV_PAGE_APPS;
 static app_id_t g_active_app = APP_NONE;
 static uint32_t g_heartbeat_count;
@@ -438,6 +499,50 @@ static const char *active_mode_detail(void)
 static const char *selected_mesh_profile_name(void)
 {
     return g_meshcore_mode ? "MeshCore" : "Meshtastic";
+}
+
+static const mesh_channel_t *selected_mesh_channel(void)
+{
+    size_t count = sizeof(g_mesh_channels) / sizeof(g_mesh_channels[0]);
+    if (g_mesh_channel_index >= count) {
+        g_mesh_channel_index = 0;
+    }
+    return &g_mesh_channels[g_mesh_channel_index];
+}
+
+static const mesh_node_t *selected_mesh_node(void)
+{
+    size_t count = sizeof(g_mesh_nodes) / sizeof(g_mesh_nodes[0]);
+    if (g_mesh_node_index >= count) {
+        g_mesh_node_index = 0;
+    }
+    return &g_mesh_nodes[g_mesh_node_index];
+}
+
+static const char *selected_mesh_draft(void)
+{
+    size_t count = sizeof(g_mesh_drafts) / sizeof(g_mesh_drafts[0]);
+    if (g_mesh_draft_index >= count) {
+        g_mesh_draft_index = 0;
+    }
+    return g_mesh_drafts[g_mesh_draft_index];
+}
+
+static bool mesh_node_is_saved(uint8_t index)
+{
+    return (g_mesh_saved_node_mask & (1UL << index)) != 0;
+}
+
+static uint32_t mesh_saved_node_count(void)
+{
+    uint32_t count = 0;
+    size_t node_count = sizeof(g_mesh_nodes) / sizeof(g_mesh_nodes[0]);
+    for (size_t i = 1; i < node_count; i++) {
+        if (mesh_node_is_saved((uint8_t)i)) {
+            count++;
+        }
+    }
+    return count;
 }
 
 static const char *mic_state_text(void)
@@ -824,6 +929,7 @@ static void write_default_config_if_missing(void)
             "  \"updateChannel\": \"stable\",\n"
             "  \"ui\": { \"home\": \"tablet\", \"autoRotate\": true, \"liveStats\": true, \"screenTimeoutSeconds\": 120, \"sleepOnTimeout\": true },\n"
             "  \"wifi\": { \"ssid\": \"\", \"password\": \"\", \"autoConnect\": false },\n"
+            "  \"mesh\": { \"defaultChannel\": 0, \"gpsShare\": false, \"saveNodes\": true, \"voiceDrafts\": true, \"storeSecrets\": false },\n"
             "  \"devices\": {\n"
             "    \"unit-c6l\": { \"enabled\": true, \"preferredTransport\": \"grove-uart\", \"mode\": \"meshtastic\" },\n"
             "    \"tdeck\": { \"enabled\": true, \"preferredTransport\": \"usb-cdc\", \"mode\": \"zdeck-meshtastic\" },\n"
@@ -967,6 +1073,27 @@ static void append_event(const char *event)
     fclose(f);
 }
 
+static void append_mesh_message(const char *direction, const char *channel, const char *node, const char *text)
+{
+    if (!g_sd_ready || direction == NULL || channel == NULL || node == NULL || text == NULL) {
+        return;
+    }
+
+    FILE *f = fopen(TABFORGE_MESH_LOG_PATH, "a");
+    if (f == NULL) {
+        return;
+    }
+
+    fprintf(f,
+            "{\"direction\":\"%s\",\"channel\":\"%.24s\",\"node\":\"%.32s\",\"text\":\"%.96s\",\"version\":\"%s\"}\n",
+            direction,
+            channel,
+            node,
+            text,
+            TABFORGE_VERSION);
+    fclose(f);
+}
+
 static esp_err_t mount_sdcard_with_config(bool format_if_mount_failed)
 {
     const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -1025,6 +1152,7 @@ static void init_sdcard(void)
     ensure_dir(TABFORGE_SD_ROOT "/tabforge/backups");
     ensure_dir(TABFORGE_SD_ROOT "/tabforge/ir");
     ensure_dir(TABFORGE_SD_ROOT "/tabforge/logs");
+    ensure_dir(TABFORGE_SD_ROOT "/tabforge/mesh");
     write_default_config_if_missing();
     if (g_sd_recovered) {
         write_sd_recovery_marker();
