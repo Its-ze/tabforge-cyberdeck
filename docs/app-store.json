@@ -1,0 +1,39 @@
+{
+  "schema": "tabforge.app-store.v0",
+  "project": "tabforge-cyberdeck",
+  "channel": "stable",
+  "updated": "2026-06-27",
+  "notes": "Data-driven TabForge mini-app packages. Packages are JSON only and do not contain native executable code.",
+  "apps": [
+    {
+      "id": "mesh-plus",
+      "name": "Mesh Plus",
+      "summary": "Channel-aware mesh messenger actions, GPS-optional status sends, and saved-node friendly defaults.",
+      "version": "0.1.0",
+      "surface": "tab5",
+      "packageUrl": "https://its-ze.github.io/tabforge-cyberdeck/apps/mesh-plus.json",
+      "sha256": "6d266e5680d8e4bea8fd5fda013d31c0e1bf6c92a90b22ef66d59e72fb53d130",
+      "size": 874
+    },
+    {
+      "id": "ir-remote-pack",
+      "name": "IR Remote Pack",
+      "summary": "Starter NEC remote macro pack for the Tab5 Grove IR unit controls.",
+      "version": "0.1.0",
+      "surface": "tab5",
+      "packageUrl": "https://its-ze.github.io/tabforge-cyberdeck/apps/ir-remote-pack.json",
+      "sha256": "4f0bc57308dfd98a952324ffcb98c7a400c5c8b8747680c159a4d7b5d9d4d64b",
+      "size": 934
+    },
+    {
+      "id": "voice-notes",
+      "name": "Voice Notes",
+      "summary": "Mic-level voice draft helpers for sending voice-note metadata through mesh text.",
+      "version": "0.1.0",
+      "surface": "tab5",
+      "packageUrl": "https://its-ze.github.io/tabforge-cyberdeck/apps/voice-notes.json",
+      "sha256": "3276f0eceb46f247df307abe865713a334e5633ad55af5d960401059ac845115",
+      "size": 709
+    }
+  ]
+}

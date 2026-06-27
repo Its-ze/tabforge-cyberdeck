@@ -479,6 +479,7 @@ static void render_active_app_page_locked(void);
 static void init_ir_probe(void);
 static void init_grove_uart_probe(void);
 static void poll_grove_uart(void);
+static void grove_uart_send_line(const char *line);
 static axis3_t g_last_acce;
 static axis3_t g_last_gyro;
 static uint64_t g_last_imu_ms;
@@ -2193,6 +2194,380 @@ static void digest_to_hex(const uint8_t digest[32], char *buffer, size_t buffer_
     buffer[64] = '\0';
 }
 
+static void sha256_hex_buffer(const uint8_t *data, size_t data_len, char *buffer, size_t buffer_size)
+{
+    if (data == NULL || buffer == NULL || buffer_size < TABFORGE_APP_SHA_LEN) {
+        return;
+    }
+
+    uint8_t digest[32];
+    mbedtls_sha256_context sha_context;
+    mbedtls_sha256_init(&sha_context);
+    mbedtls_sha256_starts(&sha_context, 0);
+    mbedtls_sha256_update(&sha_context, data, data_len);
+    mbedtls_sha256_finish(&sha_context, digest);
+    mbedtls_sha256_free(&sha_context);
+    digest_to_hex(digest, buffer, buffer_size);
+}
+
+static esp_err_t read_sd_text_file(const char *path, char *buffer, size_t buffer_size)
+{
+    if (path == NULL || buffer == NULL || buffer_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        buffer[0] = '\0';
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    size_t read_len = fread(buffer, 1, buffer_size - 1U, f);
+    bool failed = ferror(f) != 0;
+    fclose(f);
+    buffer[read_len] = '\0';
+    return failed ? ESP_FAIL : ESP_OK;
+}
+
+static esp_err_t write_sd_text_file(const char *path, const char *text)
+{
+    if (!g_sd_ready || path == NULL || text == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    FILE *f = fopen(path, "w");
+    if (f == NULL) {
+        return ESP_FAIL;
+    }
+
+    size_t text_len = strlen(text);
+    size_t written = fwrite(text, 1, text_len, f);
+    fclose(f);
+    return written == text_len ? ESP_OK : ESP_FAIL;
+}
+
+static bool app_store_id_is_safe(const char *id)
+{
+    if (id == NULL || id[0] == '\0') {
+        return false;
+    }
+
+    for (size_t i = 0; id[i] != '\0'; ++i) {
+        char ch = id[i];
+        bool ok = (ch >= 'a' && ch <= 'z') ||
+                  (ch >= 'A' && ch <= 'Z') ||
+                  (ch >= '0' && ch <= '9') ||
+                  ch == '-' ||
+                  ch == '_';
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void app_store_refresh_installed_count(void)
+{
+    g_app_store_installed_count = 0;
+    if (!g_sd_ready) {
+        return;
+    }
+
+    FILE *f = fopen(TABFORGE_APP_INSTALLED_INDEX_PATH, "r");
+    if (f == NULL) {
+        return;
+    }
+
+    int ch;
+    bool saw_content = false;
+    while ((ch = fgetc(f)) != EOF) {
+        if (ch == '\n') {
+            g_app_store_installed_count++;
+            saw_content = false;
+        } else {
+            saw_content = true;
+        }
+    }
+    if (saw_content) {
+        g_app_store_installed_count++;
+    }
+    fclose(f);
+}
+
+static bool app_store_copy_entry(cJSON *item, app_store_entry_t *entry)
+{
+    if (!cJSON_IsObject(item) || entry == NULL) {
+        return false;
+    }
+
+    memset(entry, 0, sizeof(*entry));
+    copy_json_string(item, "id", entry->id, sizeof(entry->id));
+    copy_json_string(item, "name", entry->name, sizeof(entry->name));
+    copy_json_string(item, "summary", entry->summary, sizeof(entry->summary));
+    copy_json_string(item, "version", entry->version, sizeof(entry->version));
+    copy_json_string(item, "packageUrl", entry->package_url, sizeof(entry->package_url));
+    copy_json_string(item, "sha256", entry->sha256, sizeof(entry->sha256));
+    cJSON *size = cJSON_GetObjectItemCaseSensitive(item, "size");
+    entry->size = cJSON_IsNumber(size) && size->valuedouble > 0 ? (uint32_t)size->valuedouble : 0U;
+
+    if (!app_store_id_is_safe(entry->id) || entry->package_url[0] == '\0') {
+        return false;
+    }
+    if (entry->name[0] == '\0') {
+        strlcpy(entry->name, entry->id, sizeof(entry->name));
+    }
+    if (entry->summary[0] == '\0') {
+        strlcpy(entry->summary, "TabForge mini app package.", sizeof(entry->summary));
+    }
+    if (entry->version[0] == '\0') {
+        strlcpy(entry->version, "0.0.0", sizeof(entry->version));
+    }
+    return true;
+}
+
+static esp_err_t app_store_parse_manifest(const char *manifest, uint32_t selected_index)
+{
+    if (manifest == NULL || manifest[0] == '\0') {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    cJSON *root = cJSON_Parse(manifest);
+    if (root == NULL) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    cJSON *apps = cJSON_GetObjectItemCaseSensitive(root, "apps");
+    int count = cJSON_IsArray(apps) ? cJSON_GetArraySize(apps) : 0;
+    if (count <= 0) {
+        cJSON_Delete(root);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    app_store_entry_t candidate;
+    bool found = false;
+    uint32_t start = selected_index % (uint32_t)count;
+    for (uint32_t offset = 0; offset < (uint32_t)count; ++offset) {
+        uint32_t index = (start + offset) % (uint32_t)count;
+        cJSON *item = cJSON_GetArrayItem(apps, (int)index);
+        if (app_store_copy_entry(item, &candidate)) {
+            g_app_store_selected = candidate;
+            g_app_store_selected_index = index;
+            found = true;
+            break;
+        }
+    }
+
+    g_app_store_count = (uint32_t)count;
+    cJSON_Delete(root);
+    return found ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
+}
+
+static esp_err_t app_store_select_from_cache(uint32_t selected_index)
+{
+    if (!g_sd_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char *manifest = heap_caps_malloc(TABFORGE_APP_STORE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    if (manifest == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = read_sd_text_file(TABFORGE_APP_STORE_PATH, manifest, TABFORGE_APP_STORE_MAX_BYTES);
+    if (err == ESP_OK) {
+        err = app_store_parse_manifest(manifest, selected_index);
+    }
+    heap_caps_free(manifest);
+    return err;
+}
+
+static void app_store_fetch_task(void *arg)
+{
+    (void)arg;
+
+    if (!g_wifi_has_ip) {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = ESP_ERR_INVALID_STATE;
+        strlcpy(g_app_store_last_status, "Connect Wi-Fi before fetching the store.", sizeof(g_app_store_last_status));
+        update_activity_from_task("App Store", g_app_store_last_status);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    g_app_store_state = APP_STORE_FETCHING;
+    g_app_store_last_error = ESP_OK;
+    update_activity_from_task("App Store", "Fetching GitHub catalog.");
+
+    char *manifest = heap_caps_malloc(TABFORGE_APP_STORE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    if (manifest == NULL) {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = ESP_ERR_NO_MEM;
+        strlcpy(g_app_store_last_status, "No memory for app catalog.", sizeof(g_app_store_last_status));
+        update_activity_from_task("App Store", g_app_store_last_status);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    esp_err_t err = http_get_to_buffer(g_app_store_manifest_url, manifest, TABFORGE_APP_STORE_MAX_BYTES);
+    if (err == ESP_OK) {
+        err = app_store_parse_manifest(manifest, g_app_store_selected_index);
+    }
+    if (err == ESP_OK && g_sd_ready) {
+        (void)write_sd_text_file(TABFORGE_APP_STORE_PATH, manifest);
+    }
+
+    if (err == ESP_OK) {
+        app_store_refresh_installed_count();
+        g_app_store_state = APP_STORE_READY;
+        snprintf(g_app_store_last_status,
+                 sizeof(g_app_store_last_status),
+                 "Catalog has %lu apps; selected %.31s.",
+                 (unsigned long)g_app_store_count,
+                 g_app_store_selected.name);
+        append_event("app_store_catalog_fetched");
+        update_activity_from_task("App Store", g_app_store_last_status);
+    } else {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = err;
+        snprintf(g_app_store_last_status, sizeof(g_app_store_last_status), "Fetch failed: %s", esp_err_to_name(err));
+        update_activity_from_task("App Store", g_app_store_last_status);
+    }
+
+    heap_caps_free(manifest);
+    vTaskDelete(NULL);
+}
+
+static void app_store_install_task(void *arg)
+{
+    (void)arg;
+
+    if (!g_sd_ready) {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = ESP_ERR_INVALID_STATE;
+        strlcpy(g_app_store_last_status, "SD card is required for app installs.", sizeof(g_app_store_last_status));
+        update_activity_from_task("App Store", g_app_store_last_status);
+        vTaskDelete(NULL);
+        return;
+    }
+    if (!g_wifi_has_ip) {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = ESP_ERR_INVALID_STATE;
+        strlcpy(g_app_store_last_status, "Connect Wi-Fi before installing apps.", sizeof(g_app_store_last_status));
+        update_activity_from_task("App Store", g_app_store_last_status);
+        vTaskDelete(NULL);
+        return;
+    }
+    if (g_app_store_selected.id[0] == '\0') {
+        esp_err_t cache_err = app_store_select_from_cache(g_app_store_selected_index);
+        if (cache_err != ESP_OK) {
+            g_app_store_state = APP_STORE_ERROR;
+            g_app_store_last_error = cache_err;
+            strlcpy(g_app_store_last_status, "Fetch the catalog before install.", sizeof(g_app_store_last_status));
+            update_activity_from_task("App Store", g_app_store_last_status);
+            vTaskDelete(NULL);
+            return;
+        }
+    }
+
+    g_app_store_state = APP_STORE_INSTALLING;
+    g_app_store_last_error = ESP_OK;
+    update_activity_from_task("App Store", g_app_store_selected.name);
+
+    char *package = heap_caps_malloc(TABFORGE_APP_PACKAGE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    if (package == NULL) {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = ESP_ERR_NO_MEM;
+        strlcpy(g_app_store_last_status, "No memory for app package.", sizeof(g_app_store_last_status));
+        update_activity_from_task("App Store", g_app_store_last_status);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    esp_err_t err = http_get_to_buffer(g_app_store_selected.package_url, package, TABFORGE_APP_PACKAGE_MAX_BYTES);
+    size_t package_len = err == ESP_OK ? strlen(package) : 0U;
+    if (err == ESP_OK) {
+        cJSON *package_json = cJSON_Parse(package);
+        if (package_json == NULL) {
+            err = ESP_ERR_INVALID_RESPONSE;
+        } else {
+            cJSON_Delete(package_json);
+        }
+    }
+    if (err == ESP_OK) {
+        sha256_hex_buffer((const uint8_t *)package, package_len, g_app_store_last_hash, sizeof(g_app_store_last_hash));
+        if (g_app_store_selected.sha256[0] != '\0' &&
+            strncmp(g_app_store_selected.sha256, g_app_store_last_hash, TABFORGE_APP_SHA_LEN) != 0) {
+            err = ESP_ERR_INVALID_CRC;
+        }
+    }
+    if (err == ESP_OK && g_app_store_selected.size > 0U && package_len != g_app_store_selected.size) {
+        err = ESP_ERR_INVALID_SIZE;
+    }
+    if (err == ESP_OK) {
+        char install_path[128];
+        snprintf(install_path, sizeof(install_path), TABFORGE_SD_ROOT "/tabforge/apps/%.31s.json", g_app_store_selected.id);
+        err = write_sd_text_file(install_path, package);
+    }
+    if (err == ESP_OK) {
+        FILE *index = fopen(TABFORGE_APP_INSTALLED_INDEX_PATH, "a");
+        if (index != NULL) {
+            fprintf(index,
+                    "{\"id\":\"%.31s\",\"name\":\"%.47s\",\"version\":\"%.23s\",\"sha256\":\"%.64s\"}\n",
+                    g_app_store_selected.id,
+                    g_app_store_selected.name,
+                    g_app_store_selected.version,
+                    g_app_store_last_hash);
+            fclose(index);
+        }
+    }
+
+    if (err == ESP_OK) {
+        app_store_refresh_installed_count();
+        g_app_store_state = APP_STORE_INSTALLED;
+        snprintf(g_app_store_last_status,
+                 sizeof(g_app_store_last_status),
+                 "Installed %.31s to /tabforge/apps.",
+                 g_app_store_selected.name);
+        append_event("app_store_app_installed");
+        update_activity_from_task("App Installed", g_app_store_selected.name);
+    } else {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = err;
+        snprintf(g_app_store_last_status, sizeof(g_app_store_last_status), "Install failed: %s", esp_err_to_name(err));
+        update_activity_from_task("App Install", g_app_store_last_status);
+    }
+
+    heap_caps_free(package);
+    vTaskDelete(NULL);
+}
+
+static void app_store_launch_selected(void)
+{
+    if (g_app_store_selected.id[0] == '\0') {
+        esp_err_t err = app_store_select_from_cache(g_app_store_selected_index);
+        if (err != ESP_OK) {
+            g_app_store_state = APP_STORE_ERROR;
+            g_app_store_last_error = err;
+            strlcpy(g_app_store_last_status, "Fetch or install an app before launch.", sizeof(g_app_store_last_status));
+            set_activity("App Store", g_app_store_last_status);
+            return;
+        }
+    }
+
+    char frame[160];
+    snprintf(frame,
+             sizeof(frame),
+             "{\"tabforge\":\"app.launch\",\"id\":\"%.31s\",\"source\":\"sd\"}",
+             g_app_store_selected.id);
+    grove_uart_send_line(frame);
+    snprintf(g_app_store_last_status,
+             sizeof(g_app_store_last_status),
+             "Launch requested for %.31s.",
+             g_app_store_selected.name);
+    set_activity("App Launch", g_app_store_last_status);
+    append_event("app_store_app_launch");
+}
+
 static bool parse_version_triplet(const char *version, int out[3])
 {
     if (version == NULL || out == NULL) {
@@ -2534,6 +2909,212 @@ static void grove_uart_send_line(const char *line)
     strlcpy(g_grove_last_tx, line, sizeof(g_grove_last_tx));
     append_event("grove_uart_tx");
     ESP_LOGI(TABFORGE_TAG, "Grove UART TX: %s", line);
+}
+
+static void mesh_send_text(const char *text, bool voice)
+{
+    if (text == NULL || text[0] == '\0') {
+        set_activity("Mesh Message", "No message text selected.");
+        return;
+    }
+    if (!g_ext_power_ready) {
+        set_accessory_power(true);
+        start_accessory_probe_tasks();
+    }
+
+    const mesh_channel_t *channel = selected_mesh_channel();
+    const mesh_node_t *node = selected_mesh_node();
+    char frame[256];
+    snprintf(frame,
+             sizeof(frame),
+             "{\"tabforge\":\"mesh.text\",\"profile\":\"%s\",\"channel\":%u,\"to\":\"%.32s\",\"gps\":%s,\"voice\":%s,\"text\":\"%.96s\"}",
+             selected_mesh_profile_name(),
+             (unsigned)channel->index,
+             node->node_id,
+             g_mesh_gps_share_enabled ? "true" : "false",
+             voice ? "true" : "false",
+             text);
+    grove_uart_send_line(frame);
+
+    strlcpy(g_mesh_last_sent, text, sizeof(g_mesh_last_sent));
+    g_mesh_sent_count++;
+    if (voice) {
+        g_mesh_voice_count++;
+    }
+    g_mesh_last_send_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    append_mesh_message("tx", channel->name, node->node_id, text);
+
+    char detail[128];
+    snprintf(detail,
+             sizeof(detail),
+             "%.24s -> %.24s on %.16s",
+             voice ? "Voice draft" : "Draft",
+             node->short_name,
+             channel->name);
+    set_activity("Mesh Sent", detail);
+}
+
+static void mesh_capture_voice_draft(void)
+{
+    snprintf(g_mesh_voice_text,
+             sizeof(g_mesh_voice_text),
+             "Voice note from TabForge avg %d peak %d.",
+             g_mic_average,
+             g_mic_peak);
+    g_mesh_voice_ready = true;
+    g_mesh_voice_recording = false;
+    append_event("mesh_voice_draft_ready");
+    set_activity("Voice Draft", g_mesh_voice_text);
+}
+
+static void mesh_next_channel_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    g_mesh_channel_index = (uint8_t)((g_mesh_channel_index + 1U) % TABFORGE_MESH_MAX_CHANNELS);
+    const mesh_channel_t *channel = selected_mesh_channel();
+    set_activity("Mesh Channel", channel->name);
+    append_event("mesh_channel_next");
+}
+
+static void mesh_next_node_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    g_mesh_node_index = (uint8_t)((g_mesh_node_index + 1U) % TABFORGE_MESH_MAX_NODES);
+    const mesh_node_t *node = selected_mesh_node();
+    set_activity("Mesh Node", node->name);
+    append_event("mesh_node_next");
+}
+
+static void mesh_next_draft_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    g_mesh_draft_index = (uint8_t)((g_mesh_draft_index + 1U) % TABFORGE_MESH_MAX_DRAFTS);
+    set_activity("Mesh Draft", selected_mesh_draft());
+    append_event("mesh_draft_next");
+}
+
+static void mesh_send_draft_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    mesh_send_text(selected_mesh_draft(), false);
+}
+
+static void mesh_toggle_gps_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    g_mesh_gps_share_enabled = !g_mesh_gps_share_enabled;
+    set_activity("Mesh GPS", g_mesh_gps_share_enabled ? "GPS sharing requested." : "GPS sharing disabled.");
+    append_event(g_mesh_gps_share_enabled ? "mesh_gps_on" : "mesh_gps_off");
+}
+
+static void mesh_voice_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    g_mesh_voice_recording = true;
+    mesh_capture_voice_draft();
+}
+
+static void mesh_send_voice_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    if (!g_mesh_voice_ready) {
+        mesh_capture_voice_draft();
+    }
+    mesh_send_text(g_mesh_voice_text, true);
+}
+
+static void mesh_toggle_saved_node_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    if (g_mesh_node_index == 0) {
+        set_activity("Saved Nodes", "Broadcast is always available.");
+        return;
+    }
+    uint32_t bit = 1UL << g_mesh_node_index;
+    bool will_save = (g_mesh_saved_node_mask & bit) == 0;
+    if (will_save) {
+        g_mesh_saved_node_mask |= bit;
+    } else {
+        g_mesh_saved_node_mask &= ~bit;
+    }
+    set_activity("Saved Nodes", will_save ? "Node saved." : "Node removed from saved list.");
+    append_event(will_save ? "mesh_node_saved" : "mesh_node_unsaved");
+}
+
+static void app_store_fetch_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    xTaskCreate(app_store_fetch_task, "tabforge-app-store-fetch", 8192, NULL, 5, NULL);
+}
+
+static void app_store_next_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    esp_err_t err = app_store_select_from_cache(g_app_store_selected_index + 1U);
+    if (err == ESP_OK) {
+        g_app_store_state = APP_STORE_READY;
+        snprintf(g_app_store_last_status,
+                 sizeof(g_app_store_last_status),
+                 "Selected %.31s.",
+                 g_app_store_selected.name);
+        set_activity("App Store", g_app_store_last_status);
+        append_event("app_store_next_app");
+    } else {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = err;
+        strlcpy(g_app_store_last_status, "Fetch the catalog before cycling apps.", sizeof(g_app_store_last_status));
+        set_activity("App Store", g_app_store_last_status);
+    }
+}
+
+static void app_store_install_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    xTaskCreate(app_store_install_task, "tabforge-app-store-install", 8192, NULL, 5, NULL);
+}
+
+static void app_store_launch_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    app_store_launch_selected();
+}
+
+static void app_store_sd_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    app_store_refresh_installed_count();
+    snprintf(g_app_store_last_status,
+             sizeof(g_app_store_last_status),
+             "%lu installed app records on SD.",
+             (unsigned long)g_app_store_installed_count);
+    set_activity("SD Apps", g_app_store_last_status);
+    append_event("app_store_sd_checked");
 }
 
 static rmt_symbol_word_t ir_symbol(uint32_t mark_us, uint32_t space_us)
@@ -3145,6 +3726,124 @@ static void add_app_status_line(lv_obj_t *parent,
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
 }
 
+static void render_mesh_messenger_locked(lv_obj_t *card, lv_coord_t width, bool landscape)
+{
+    (void)landscape;
+
+    const mesh_channel_t *channel = selected_mesh_channel();
+    const mesh_node_t *node = selected_mesh_node();
+    char line[192];
+
+    snprintf(line,
+             sizeof(line),
+             "%.16s ch%u %s | GPS %s | saved %lu",
+             channel->name,
+             (unsigned)channel->index,
+             channel->role,
+             g_mesh_gps_share_enabled ? "on" : "off",
+             (unsigned long)mesh_saved_node_count());
+    add_app_status_line(card, "Channel", line, width, 0x43d17a);
+
+    snprintf(line,
+             sizeof(line),
+             "%.24s %.12s %.32s | hop %d | %s",
+             node->name,
+             node->short_name,
+             node->node_id,
+             node->hop_limit,
+             mesh_node_is_saved(g_mesh_node_index) ? "saved" : "not saved");
+    add_app_status_line(card, "To", line, width, 0xf1f7f3);
+
+    snprintf(line, sizeof(line), "%.96s", selected_mesh_draft());
+    add_app_status_line(card, "Draft", line, width, 0x93a6ad);
+
+    snprintf(line,
+             sizeof(line),
+             "%s | ready %s | voice sends %lu | avg %d peak %d",
+             g_mesh_voice_recording ? "recording" : "idle",
+             g_mesh_voice_ready ? "yes" : "no",
+             (unsigned long)g_mesh_voice_count,
+             g_mic_average,
+             g_mic_peak);
+    add_app_status_line(card, "Voice", line, width, 0xb982ff);
+
+    snprintf(line,
+             sizeof(line),
+             "TX %lu RX %lu | Grove %lu/%lu bytes | USB %lu/%lu bytes",
+             (unsigned long)g_mesh_sent_count,
+             (unsigned long)g_mesh_received_count,
+             (unsigned long)g_grove_rx_packets,
+             (unsigned long)g_grove_rx_bytes,
+             (unsigned long)g_usb_rx_packets,
+             (unsigned long)g_usb_rx_bytes);
+    add_app_status_line(card, "Link", line, width, 0x61d5f0);
+
+    snprintf(line, sizeof(line), "%.95s", g_mesh_last_sent);
+    add_app_status_line(card, "Last TX", line, width, 0xf0bf4f);
+    snprintf(line, sizeof(line), "%.95s", g_mesh_last_received);
+    add_app_status_line(card, "Last RX", line, width, 0x70a7ff);
+
+    make_text(card, "Saved / recent nodes", 0x8fb0bb, width);
+    size_t node_count = sizeof(g_mesh_nodes) / sizeof(g_mesh_nodes[0]);
+    for (size_t i = 0; i < node_count; ++i) {
+        const mesh_node_t *entry = &g_mesh_nodes[i];
+        snprintf(line,
+                 sizeof(line),
+                 "%c %.12s %.32s batt %s last %.12s",
+                 i == g_mesh_node_index ? '>' : ' ',
+                 entry->short_name,
+                 entry->node_id,
+                 entry->battery_percent >= 0 ? "ok" : "--",
+                 entry->last_seen);
+        add_app_status_line(card, entry->name, line, width, i == g_mesh_node_index ? 0x43d17a : 0x93a6ad);
+    }
+}
+
+static void render_app_store_locked(lv_obj_t *card, lv_coord_t width)
+{
+    app_store_refresh_installed_count();
+
+    char line[192];
+    snprintf(line,
+             sizeof(line),
+             "%s | catalog %lu | installed %lu",
+             app_store_state_text(),
+             (unsigned long)g_app_store_count,
+             (unsigned long)g_app_store_installed_count);
+    add_app_status_line(card, "Store", line, width, 0x5ec8ff);
+
+    snprintf(line,
+             sizeof(line),
+             "%lu/%lu %.47s v%.23s",
+             g_app_store_count > 0 ? (unsigned long)(g_app_store_selected_index + 1U) : 0UL,
+             (unsigned long)g_app_store_count,
+             g_app_store_selected.name[0] != '\0' ? g_app_store_selected.name : "No app selected",
+             g_app_store_selected.version[0] != '\0' ? g_app_store_selected.version : "-");
+    add_app_status_line(card, "Selected", line, width, 0xf1f7f3);
+
+    snprintf(line,
+             sizeof(line),
+             "%.111s",
+             g_app_store_selected.summary[0] != '\0' ? g_app_store_selected.summary : g_app_store_last_status);
+    add_app_status_line(card, "Summary", line, width, 0x93a6ad);
+
+    snprintf(line,
+             sizeof(line),
+             "%.96s | SD %s | /tabforge/apps",
+             g_app_store_manifest_url,
+             g_sd_ready ? "ready" : "missing");
+    add_app_status_line(card, "Source", line, width, 0x77dd88);
+
+    snprintf(line,
+             sizeof(line),
+             "%.64s",
+             g_app_store_last_hash[0] != '\0' ? g_app_store_last_hash : (g_app_store_selected.sha256[0] != '\0' ? g_app_store_selected.sha256 : "not verified"));
+    add_app_status_line(card, "SHA256", line, width, 0xffc857);
+
+    snprintf(line, sizeof(line), "%.111s", g_app_store_last_status);
+    add_app_status_line(card, "Status", line, width, g_app_store_state == APP_STORE_ERROR ? 0xff7a66 : 0xf1f7f3);
+}
+
 static void add_app_actions(lv_obj_t *parent,
                             lv_coord_t width,
                             bool landscape,
@@ -3152,7 +3851,11 @@ static void add_app_actions(lv_obj_t *parent,
 {
     lv_obj_t *actions = lv_obj_create(parent);
     lv_obj_remove_style_all(actions);
-    lv_obj_set_size(actions, width, landscape ? 112 : 236);
+    lv_coord_t action_h = landscape ? 112 : 236;
+    if (app_id == APP_MESSAGES || app_id == APP_IR || app_id == APP_STORE) {
+        action_h = landscape ? 174 : 348;
+    }
+    lv_obj_set_size(actions, width, action_h);
     lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
@@ -3176,10 +3879,16 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
         break;
     case APP_MESSAGES:
-        make_button(actions, button_w, "Send Test", mesh_probe_button_event_cb);
-        make_button(actions, button_w, "Mesh Ping", grove_meshtastic_ping_button_event_cb);
+        make_button(actions, button_w, "Channel", mesh_next_channel_button_event_cb);
+        make_button(actions, button_w, "Node", mesh_next_node_button_event_cb);
+        make_button(actions, button_w, "Draft", mesh_next_draft_button_event_cb);
+        make_button(actions, button_w, "Send", mesh_send_draft_button_event_cb);
+        make_button(actions, button_w, "GPS", mesh_toggle_gps_button_event_cb);
+        make_button(actions, button_w, "Voice", mesh_voice_button_event_cb);
+        make_button(actions, button_w, "Send Voice", mesh_send_voice_button_event_cb);
+        make_button(actions, button_w, "Save Node", mesh_toggle_saved_node_button_event_cb);
+        make_button(actions, button_w, "Probe", mesh_probe_button_event_cb);
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
-        make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
         break;
     case APP_MESHCORE:
         make_button(actions, button_w, "Switch Mode", mode_button_event_cb);
@@ -3213,6 +3922,15 @@ static void add_app_actions(lv_obj_t *parent,
     case APP_FILES:
         make_button(actions, button_w, "Settings", settings_button_event_cb);
         make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
+        break;
+    case APP_STORE:
+        make_button(actions, button_w, "Fetch", app_store_fetch_button_event_cb);
+        make_button(actions, button_w, "Next App", app_store_next_button_event_cb);
+        make_button(actions, button_w, "Install", app_store_install_button_event_cb);
+        make_button(actions, button_w, "Launch", app_store_launch_button_event_cb);
+        make_button(actions, button_w, "SD Apps", app_store_sd_button_event_cb);
+        make_button(actions, button_w, "Wi-Fi", update_button_event_cb);
+        make_button(actions, button_w, "Update", ota_start_button_event_cb);
         break;
     case APP_UPDATE:
         make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
@@ -3274,16 +3992,7 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Update", line_c, width - 32, 0xffc857);
         break;
     case APP_MESSAGES:
-        snprintf(line_a, sizeof(line_a), "%s | %s", active_mode_name(), active_mode_detail());
-        snprintf(line_b, sizeof(line_b), "RX %lu/%lu bytes | TX %lu/%lu bytes",
-                 (unsigned long)g_grove_rx_packets,
-                 (unsigned long)g_grove_rx_bytes,
-                 (unsigned long)g_grove_tx_packets,
-                 (unsigned long)g_grove_tx_bytes);
-        snprintf(line_c, sizeof(line_c), "USB %s | last TX %s", usb_state_text(), g_grove_last_tx);
-        add_app_status_line(card, "Mode", line_a, width - 32, 0xf1f7f3);
-        add_app_status_line(card, "C6L", line_b, width - 32, 0x43d17a);
-        add_app_status_line(card, "Link", line_c, width - 32, 0x93a6ad);
+        render_mesh_messenger_locked(card, width - 32, landscape);
         break;
     case APP_MESHCORE:
         snprintf(line_a, sizeof(line_a), "Selected %s", selected_mesh_profile_name());
@@ -3359,6 +4068,9 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Card", line_a, width - 32, 0x77dd88);
         add_app_status_line(card, "Config", line_b, width - 32, 0xf1f7f3);
         add_app_status_line(card, "Paths", line_c, width - 32, 0x93a6ad);
+        break;
+    case APP_STORE:
+        render_app_store_locked(card, width - 32);
         break;
     case APP_UPDATE:
         snprintf(line_a, sizeof(line_a), "%s | manifest %s",
@@ -3893,13 +4605,12 @@ static void init_grove_uart_probe(void)
 
 static bool usb_cdc_rx_cb(const uint8_t *data, size_t data_len, void *user_arg)
 {
-    (void)data;
     (void)user_arg;
 
     g_usb_rx_packets++;
     g_usb_rx_bytes += (uint32_t)data_len;
     g_usb_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
-    g_mesh_module_ready = true;
+    mesh_record_rx("usb-cdc", data, data_len);
     return true;
 }
 
@@ -4029,7 +4740,7 @@ static void poll_grove_uart(void)
         g_grove_rx_packets++;
         g_grove_rx_bytes += (uint32_t)rx_len;
         g_grove_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
-        g_mesh_module_ready = true;
+        mesh_record_rx("grove-uart", uart_data, (size_t)rx_len);
         ESP_LOGI(TABFORGE_TAG, "C6L Grove UART RX %d bytes", rx_len);
     }
 }

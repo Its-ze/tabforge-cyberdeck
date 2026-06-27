@@ -26,6 +26,8 @@ Included now:
 - Boot-time add-on bring-up for the Tab5 expansion 5V rail, USB-A host power, USB CDC scan/read counters, corrected Grove IR pins, and a passive Grove UART RX counter for C6L-style serial traffic.
 - Feature catalog for mesh, IR, mic/audio, T-Deck, C6L, USB host, SD, camera, IMU, RS485, and updates.
 - Meshtastic/MeshCore mode-switch contract.
+- Full-screen mesh messenger shell with channel selection, saved nodes, GPS-optional sends, canned messages, Grove/USB RX previews, SD message history, and mic-backed voice draft metadata.
+- GitHub Pages app store manifest with SHA256-checked JSON mini-app packages installed to `/tabforge/apps` on the Tab5 SD card.
 - GitHub Pages OTA manifests and update-channel metadata.
 - Local cyberdeck console preview under `web/console`.
 - Verification and publish scripts.

@@ -1,0 +1,42 @@
+{
+  "schema": "tabforge.mini-app.v0",
+  "id": "mesh-plus",
+  "name": "Mesh Plus",
+  "version": "0.1.0",
+  "surface": "tab5",
+  "storage": {
+    "root": "/tabforge/apps/mesh-plus",
+    "writes": [
+      "/tabforge/mesh/messages.jsonl",
+      "/tabforge/apps/mesh-plus/state.json"
+    ]
+  },
+  "permissions": {
+    "meshText": true,
+    "meshChannels": true,
+    "gpsOptional": true,
+    "micVoiceDrafts": true,
+    "nativeCode": false
+  },
+  "actions": [
+    {
+      "id": "broadcast-status",
+      "label": "Broadcast Status",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "text": "Status green."
+      }
+    },
+    {
+      "id": "share-location",
+      "label": "Share Location",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "gps": true,
+        "text": "Need assist at my location."
+      }
+    }
+  ]
+}

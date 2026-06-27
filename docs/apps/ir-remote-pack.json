@@ -1,0 +1,48 @@
+{
+  "schema": "tabforge.mini-app.v0",
+  "id": "ir-remote-pack",
+  "name": "IR Remote Pack",
+  "version": "0.1.0",
+  "surface": "tab5",
+  "storage": {
+    "root": "/tabforge/apps/ir-remote-pack",
+    "writes": [
+      "/tabforge/ir/macros.json"
+    ]
+  },
+  "permissions": {
+    "irSend": true,
+    "irLearn": true,
+    "nativeCode": false
+  },
+  "actions": [
+    {
+      "id": "nec-power",
+      "label": "Power",
+      "protocol": "nec",
+      "address": "0x00ff",
+      "command": "0x45"
+    },
+    {
+      "id": "nec-mute",
+      "label": "Mute",
+      "protocol": "nec",
+      "address": "0x00ff",
+      "command": "0x47"
+    },
+    {
+      "id": "nec-volume-up",
+      "label": "Volume Up",
+      "protocol": "nec",
+      "address": "0x00ff",
+      "command": "0x09"
+    },
+    {
+      "id": "nec-volume-down",
+      "label": "Volume Down",
+      "protocol": "nec",
+      "address": "0x00ff",
+      "command": "0x15"
+    }
+  ]
+}

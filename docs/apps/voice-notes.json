@@ -1,0 +1,36 @@
+{
+  "schema": "tabforge.mini-app.v0",
+  "id": "voice-notes",
+  "name": "Voice Notes",
+  "version": "0.1.0",
+  "surface": "tab5",
+  "storage": {
+    "root": "/tabforge/apps/voice-notes",
+    "writes": [
+      "/tabforge/audio",
+      "/tabforge/mesh/messages.jsonl"
+    ]
+  },
+  "permissions": {
+    "micLevel": true,
+    "micVoiceDrafts": true,
+    "meshText": true,
+    "nativeCode": false
+  },
+  "actions": [
+    {
+      "id": "voice-draft",
+      "label": "Create Voice Draft",
+      "mode": "mic-level-summary"
+    },
+    {
+      "id": "send-voice-draft",
+      "label": "Send Voice Draft",
+      "frame": {
+        "tabforge": "mesh.text",
+        "voice": true,
+        "to": "^all"
+      }
+    }
+  ]
+}

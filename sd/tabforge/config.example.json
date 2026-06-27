@@ -9,6 +9,19 @@
     "password": "",
     "autoConnect": false
   },
+  "mesh": {
+    "defaultChannel": 0,
+    "gpsShare": false,
+    "saveNodes": true,
+    "voiceDrafts": true,
+    "storeSecrets": false
+  },
+  "appStore": {
+    "manifestUrl": "https://its-ze.github.io/tabforge-cyberdeck/app-store.json",
+    "installRoot": "/tabforge/apps",
+    "cacheOnSd": true,
+    "nativeCode": false
+  },
   "devices": {
     "unit-c6l": {
       "enabled": true,

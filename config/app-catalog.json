@@ -77,6 +77,14 @@
       "capabilities": ["sd-notes", "event-log", "export-redacted", "location-optional"]
     },
     {
+      "id": "app-store",
+      "name": "App Store",
+      "group": "data",
+      "status": "active",
+      "surfaces": ["tab5", "github-pages"],
+      "capabilities": ["github-catalog", "sha256-package-check", "sd-install", "mini-app-launch-frame", "no-native-code"]
+    },
+    {
       "id": "usb-host",
       "name": "USB Host",
       "group": "ports",
