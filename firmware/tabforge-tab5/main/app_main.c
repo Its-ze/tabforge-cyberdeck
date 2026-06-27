@@ -8,6 +8,7 @@
 #include "bsp/esp-bsp.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "driver/rmt_tx.h"
 #include "driver/uart.h"
 #include "esp_crt_bundle.h"
 #include "esp_app_desc.h"
@@ -92,6 +93,14 @@
 #define TABFORGE_GROVE_RX_GPIO GPIO_NUM_54
 #define TABFORGE_IR_TX_GPIO TABFORGE_GROVE_TX_GPIO
 #define TABFORGE_IR_RX_GPIO TABFORGE_GROVE_RX_GPIO
+#define TABFORGE_IR_NEC_ADDRESS 0x00FF
+#define TABFORGE_IR_RMT_RESOLUTION_HZ 1000000
+#define TABFORGE_IR_NEC_HDR_MARK_US 9000
+#define TABFORGE_IR_NEC_HDR_SPACE_US 4500
+#define TABFORGE_IR_NEC_BIT_MARK_US 560
+#define TABFORGE_IR_NEC_ONE_SPACE_US 1690
+#define TABFORGE_IR_NEC_ZERO_SPACE_US 560
+#define TABFORGE_IR_NEC_END_SPACE_US 10000
 #define GROVE_UART_NUM UART_NUM_1
 #define GROVE_UART_BAUDRATE 115200
 #define GROVE_UART_RX_BUF_SIZE 2048
@@ -293,13 +302,22 @@ static esp_err_t g_usb_power_error = ESP_OK;
 static bool g_charge_enable_ready;
 static esp_err_t g_charge_enable_error = ESP_OK;
 static bool g_ir_probe_ready;
+static bool g_ir_isr_attached;
 static int g_ir_level = -1;
-static uint32_t g_ir_edges;
+static volatile uint32_t g_ir_edges;
+static uint32_t g_ir_tx_count;
+static uint32_t g_ir_last_code;
+static uint64_t g_ir_last_tx_ms;
+static char g_ir_last_command[24] = "none";
 static bool g_grove_uart_ready;
 static esp_err_t g_grove_uart_error = ESP_OK;
 static uint32_t g_grove_rx_packets;
 static uint32_t g_grove_rx_bytes;
 static uint64_t g_grove_last_rx_ms;
+static uint32_t g_grove_tx_packets;
+static uint32_t g_grove_tx_bytes;
+static uint64_t g_grove_last_tx_ms;
+static char g_grove_last_tx[48] = "none";
 static bool g_usb_host_ready;
 static usb_state_t g_usb_state = USB_STATE_OFF;
 static esp_err_t g_usb_last_error = ESP_OK;
@@ -2279,8 +2297,208 @@ static void grove_uart_send_line(const char *line)
     }
     uart_write_bytes(GROVE_UART_NUM, line, strlen(line));
     uart_write_bytes(GROVE_UART_NUM, "\n", 1);
+    g_grove_tx_packets++;
+    g_grove_tx_bytes += (uint32_t)strlen(line) + 1;
+    g_grove_last_tx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    strlcpy(g_grove_last_tx, line, sizeof(g_grove_last_tx));
     append_event("grove_uart_tx");
     ESP_LOGI(TABFORGE_TAG, "Grove UART TX: %s", line);
+}
+
+static rmt_symbol_word_t ir_symbol(uint32_t mark_us, uint32_t space_us)
+{
+    rmt_symbol_word_t symbol = {
+        .duration0 = mark_us,
+        .level0 = 1,
+        .duration1 = space_us,
+        .level1 = 0,
+    };
+    return symbol;
+}
+
+static void restore_ir_tx_idle(void)
+{
+    gpio_config_t tx_config = {
+        .pin_bit_mask = (1ULL << (uint32_t)TABFORGE_IR_TX_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&tx_config);
+    gpio_set_level(TABFORGE_IR_TX_GPIO, 0);
+
+    if (g_grove_uart_ready) {
+        esp_err_t err = uart_set_pin(GROVE_UART_NUM,
+                                     (int)TABFORGE_GROVE_TX_GPIO,
+                                     (int)TABFORGE_GROVE_RX_GPIO,
+                                     UART_PIN_NO_CHANGE,
+                                     UART_PIN_NO_CHANGE);
+        if (err != ESP_OK) {
+            g_grove_uart_error = err;
+            g_grove_uart_ready = false;
+            ESP_LOGW(TABFORGE_TAG, "Grove UART restore after IR failed: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+static esp_err_t ir_send_nec_command(uint8_t command, const char *name)
+{
+    if (!g_ext_power_ready) {
+        set_accessory_power(true);
+        start_accessory_probe_tasks();
+    }
+    if (!g_ir_probe_ready) {
+        init_ir_probe();
+    }
+    if (!g_ir_probe_ready) {
+        set_activity("IR Remote", "IR unit is not ready.");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (g_grove_uart_ready) {
+        uart_wait_tx_done(GROVE_UART_NUM, pdMS_TO_TICKS(100));
+    }
+
+    rmt_channel_handle_t tx_channel = NULL;
+    rmt_encoder_handle_t copy_encoder = NULL;
+    rmt_tx_channel_config_t tx_channel_config = {
+        .gpio_num = TABFORGE_IR_TX_GPIO,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = TABFORGE_IR_RMT_RESOLUTION_HZ,
+        .mem_block_symbols = 64,
+        .trans_queue_depth = 1,
+    };
+
+    esp_err_t err = rmt_new_tx_channel(&tx_channel_config, &tx_channel);
+    if (err == ESP_OK) {
+        err = rmt_enable(tx_channel);
+    }
+    if (err == ESP_OK) {
+        rmt_copy_encoder_config_t copy_encoder_config = {};
+        err = rmt_new_copy_encoder(&copy_encoder_config, &copy_encoder);
+    }
+
+    rmt_symbol_word_t symbols[34] = {0};
+    size_t symbol_count = 0;
+    symbols[symbol_count++] = ir_symbol(TABFORGE_IR_NEC_HDR_MARK_US, TABFORGE_IR_NEC_HDR_SPACE_US);
+
+    uint32_t payload = ((uint32_t)(TABFORGE_IR_NEC_ADDRESS & 0xffU)) |
+                       ((uint32_t)((TABFORGE_IR_NEC_ADDRESS >> 8) & 0xffU) << 8) |
+                       ((uint32_t)command << 16) |
+                       ((uint32_t)(command ^ 0xffU) << 24);
+    for (uint8_t bit = 0; bit < 32; bit++) {
+        bool one = ((payload >> bit) & 0x01U) != 0;
+        symbols[symbol_count++] = ir_symbol(TABFORGE_IR_NEC_BIT_MARK_US,
+                                            one ? TABFORGE_IR_NEC_ONE_SPACE_US : TABFORGE_IR_NEC_ZERO_SPACE_US);
+    }
+    symbols[symbol_count++] = ir_symbol(TABFORGE_IR_NEC_BIT_MARK_US, TABFORGE_IR_NEC_END_SPACE_US);
+
+    if (err == ESP_OK) {
+        rmt_transmit_config_t tx_config = {
+            .loop_count = 0,
+        };
+        err = rmt_transmit(tx_channel, copy_encoder, symbols, symbol_count * sizeof(symbols[0]), &tx_config);
+    }
+    if (err == ESP_OK) {
+        err = rmt_tx_wait_all_done(tx_channel, pdMS_TO_TICKS(250));
+    }
+
+    if (copy_encoder != NULL) {
+        rmt_del_encoder(copy_encoder);
+    }
+    if (tx_channel != NULL) {
+        rmt_disable(tx_channel);
+        rmt_del_channel(tx_channel);
+    }
+    restore_ir_tx_idle();
+
+    if (err == ESP_OK) {
+        g_ir_tx_count++;
+        g_ir_last_code = command;
+        g_ir_last_tx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+        strlcpy(g_ir_last_command, name != NULL ? name : "NEC", sizeof(g_ir_last_command));
+        append_event("ir_nec_tx");
+        char detail[64];
+        snprintf(detail, sizeof(detail), "%s NEC cmd 0x%02x", g_ir_last_command, command);
+        set_activity("IR Remote", detail);
+        ESP_LOGI(TABFORGE_TAG, "IR NEC TX %s command=0x%02x address=0x%04x",
+                 g_ir_last_command,
+                 command,
+                 TABFORGE_IR_NEC_ADDRESS);
+    } else {
+        char detail[64];
+        snprintf(detail, sizeof(detail), "IR TX failed: %s", esp_err_to_name(err));
+        set_activity("IR Remote", detail);
+        ESP_LOGW(TABFORGE_TAG, "%s", detail);
+    }
+
+    return err;
+}
+
+static void ir_power_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        ir_send_nec_command(0x45, "Power");
+    }
+}
+
+static void ir_mute_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        ir_send_nec_command(0x47, "Mute");
+    }
+}
+
+static void ir_volume_up_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        ir_send_nec_command(0x09, "Vol+");
+    }
+}
+
+static void ir_volume_down_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        ir_send_nec_command(0x15, "Vol-");
+    }
+}
+
+static void ir_listen_reset_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    g_ir_edges = 0;
+    set_activity("IR Learn", "Receiver edge counter reset.");
+    append_event("ir_listen_reset");
+}
+
+static void grove_meshtastic_ping_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    grove_uart_send_line("TabForge Meshtastic ping");
+    set_activity("Meshtastic Ping", g_grove_uart_ready ? "Sent over Grove UART." : "Grove UART is not ready.");
+}
+
+static void grove_meshcore_help_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    grove_uart_send_line("help");
+    set_activity("MeshCore Probe", g_grove_uart_ready ? "Sent help over Grove UART." : "Grove UART is not ready.");
+}
+
+static void grove_tdeck_ping_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    grove_uart_send_line("{\"tabforge\":\"tdeck-ping\"}");
+    set_activity("T-Deck Ping", g_grove_uart_ready ? "Sent JSON ping over Grove UART." : "Grove UART is not ready.");
 }
 
 static void mesh_probe_button_event_cb(lv_event_t *event)
