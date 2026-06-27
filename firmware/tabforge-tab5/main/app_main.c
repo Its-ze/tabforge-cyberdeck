@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
@@ -145,6 +146,15 @@
 #define TABFORGE_APP_VERSION_LEN 24
 #define TABFORGE_APP_URL_LEN 192
 #define TABFORGE_APP_SHA_LEN 65
+#define MESHTASTIC_STREAM_START1 0x94
+#define MESHTASTIC_STREAM_START2 0xC3
+#define MESHTASTIC_MAX_PROTO_LEN 512
+#define MESHTASTIC_MAX_FRAME_LEN (MESHTASTIC_MAX_PROTO_LEN + 4)
+#define MESHTASTIC_BROADCAST_NUM 0xffffffffUL
+#define MESHTASTIC_TEXT_MESSAGE_APP 1
+#define MESHTASTIC_RELIABLE_PRIORITY 70
+#define MESHTASTIC_CONFIG_ID 0x54464731UL
+#define MESHTASTIC_TX_TIMEOUT_MS 1000
 
 typedef enum {
     FEATURE_ACTIVE,
@@ -316,6 +326,11 @@ typedef struct {
     uint32_t size;
 } app_store_entry_t;
 
+typedef struct {
+    uint8_t buffer[MESHTASTIC_MAX_FRAME_LEN];
+    size_t length;
+} meshtastic_rx_state_t;
+
 static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_WIFI, "Wi-Fi", "Scan, connect, and prepare internet OTA.", "Internet", "tile_wifi", APP_WIFI, FEATURE_ACTIVE, 0x70a7ff},
     {LV_SYMBOL_ENVELOPE, "Messages", "Meshtastic C6L channel text and direct sends.", "Grove", "tile_meshtastic", APP_MESSAGES, FEATURE_ACTIVE, 0x43d17a},
@@ -346,9 +361,9 @@ static const mesh_channel_t g_mesh_channels[] = {
 
 static const mesh_node_t g_mesh_nodes[] = {
     {"Broadcast", "ALL", "^all", 3, -1, false, "now"},
-    {"ITSZ T-Deck", "TDK", "!e072a1ccfe78", 3, 100, true, "USB"},
+    {"ITSZ T-Deck 2", "TDK2", "!2d42b8ad", 3, 101, true, "USB"},
     {"Unit C6L", "C6L", "!unit-c6l", 3, -1, false, "Grove"},
-    {"Base LongFast", "BASE", "!2d42b8ad", 3, 101, false, "heard"},
+    {"Pager Mesh", "PGR", "!37ac5686", 3, -1, false, "TCP"},
     {"Field Node", "FLD", "!field", 2, 88, true, "saved"},
     {"Repeater", "RPT", "!repeat", 5, -1, false, "saved"},
 };
@@ -383,9 +398,17 @@ static bool g_mesh_voice_ready;
 static uint32_t g_mesh_sent_count;
 static uint32_t g_mesh_received_count;
 static uint32_t g_mesh_voice_count;
+static uint32_t g_meshtastic_api_tx_frames;
+static uint32_t g_meshtastic_api_rx_frames;
+static uint32_t g_meshtastic_api_parse_errors;
+static uint32_t g_meshtastic_bridge_tx_lines;
+static uint32_t g_meshtastic_packet_seq;
+static meshtastic_rx_state_t g_meshtastic_usb_rx;
+static meshtastic_rx_state_t g_meshtastic_grove_rx;
 static uint64_t g_mesh_last_send_ms;
 static char g_mesh_last_sent[TABFORGE_MESH_PREVIEW_LEN] = "none";
 static char g_mesh_last_received[TABFORGE_MESH_PREVIEW_LEN] = "none";
+static char g_mesh_last_transport[32] = "waiting";
 static char g_mesh_voice_text[TABFORGE_MESH_PREVIEW_LEN] = "Tap Voice to create a voice draft.";
 static char g_app_store_manifest_url[TABFORGE_APP_URL_LEN] = TABFORGE_APP_STORE_URL;
 static app_store_state_t g_app_store_state = APP_STORE_IDLE;
@@ -431,7 +454,10 @@ static uint32_t g_usb_open_count;
 static uint32_t g_usb_disconnect_count;
 static uint32_t g_usb_rx_packets;
 static uint32_t g_usb_rx_bytes;
+static uint32_t g_usb_tx_packets;
+static uint32_t g_usb_tx_bytes;
 static uint64_t g_usb_last_rx_ms;
+static uint64_t g_usb_last_tx_ms;
 static cdc_acm_dev_hdl_t g_usb_cdc_handle;
 static bool g_usb_cdc_disconnected;
 static i2c_master_dev_handle_t g_battery_monitor;
@@ -486,6 +512,8 @@ static void init_ir_probe(void);
 static void init_grove_uart_probe(void);
 static void poll_grove_uart(void);
 static void grove_uart_send_line(const char *line);
+static bool grove_uart_send_bytes(const uint8_t *data, size_t data_len, const char *label);
+static bool usb_cdc_send_bytes(const uint8_t *data, size_t data_len, const char *label);
 static void request_active_app_refresh(void);
 static axis3_t g_last_acce;
 static axis3_t g_last_gyro;
