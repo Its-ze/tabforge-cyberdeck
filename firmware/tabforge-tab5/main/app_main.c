@@ -2946,6 +2946,7 @@ static void add_app_actions(lv_obj_t *parent,
         break;
     case APP_MESSAGES:
         make_button(actions, button_w, "Send Test", mesh_probe_button_event_cb);
+        make_button(actions, button_w, "Mesh Ping", grove_meshtastic_ping_button_event_cb);
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
         make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
         break;
@@ -2953,13 +2954,20 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Switch Mode", mode_button_event_cb);
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
         make_button(actions, button_w, "Send Help", mesh_probe_button_event_cb);
+        make_button(actions, button_w, "Core Help", grove_meshcore_help_button_event_cb);
         break;
     case APP_TDECK:
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
+        make_button(actions, button_w, "T-Deck Ping", grove_tdeck_ping_button_event_cb);
         make_button(actions, button_w, "Mesh Mode", mode_button_event_cb);
         make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
         break;
     case APP_IR:
+        make_button(actions, button_w, "Power", ir_power_button_event_cb);
+        make_button(actions, button_w, "Mute", ir_mute_button_event_cb);
+        make_button(actions, button_w, "Vol +", ir_volume_up_button_event_cb);
+        make_button(actions, button_w, "Vol -", ir_volume_down_button_event_cb);
+        make_button(actions, button_w, "Listen", ir_listen_reset_button_event_cb);
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
         make_button(actions, button_w, "Settings", settings_button_event_cb);
         break;
@@ -3036,10 +3044,12 @@ static void render_active_app_page_locked(void)
         break;
     case APP_MESSAGES:
         snprintf(line_a, sizeof(line_a), "%s | %s", active_mode_name(), active_mode_detail());
-        snprintf(line_b, sizeof(line_b), "Grove RX %lu packets / %lu bytes",
+        snprintf(line_b, sizeof(line_b), "RX %lu/%lu bytes | TX %lu/%lu bytes",
                  (unsigned long)g_grove_rx_packets,
-                 (unsigned long)g_grove_rx_bytes);
-        snprintf(line_c, sizeof(line_c), "USB %s | radio %s", usb_state_text(), g_mesh_module_ready ? "heard" : "waiting");
+                 (unsigned long)g_grove_rx_bytes,
+                 (unsigned long)g_grove_tx_packets,
+                 (unsigned long)g_grove_tx_bytes);
+        snprintf(line_c, sizeof(line_c), "USB %s | last TX %s", usb_state_text(), g_grove_last_tx);
         add_app_status_line(card, "Mode", line_a, width - 32, 0xf1f7f3);
         add_app_status_line(card, "C6L", line_b, width - 32, 0x43d17a);
         add_app_status_line(card, "Link", line_c, width - 32, 0x93a6ad);
@@ -3049,7 +3059,9 @@ static void render_active_app_page_locked(void)
         snprintf(line_b, sizeof(line_b), "Grove %s | USB %s",
                  g_grove_uart_ready ? "ready" : "pending",
                  usb_state_text());
-        snprintf(line_c, sizeof(line_c), "Use Switch Mode to flip profiles and send a serial probe.");
+        snprintf(line_c, sizeof(line_c), "Last TX %s | RX %lu packets",
+                 g_grove_last_tx,
+                 (unsigned long)g_grove_rx_packets);
         add_app_status_line(card, "Profile", line_a, width - 32, 0xf1f7f3);
         add_app_status_line(card, "Transport", line_b, width - 32, 0x61d5f0);
         add_app_status_line(card, "Action", line_c, width - 32, 0x93a6ad);
@@ -3062,7 +3074,9 @@ static void render_active_app_page_locked(void)
         snprintf(line_b, sizeof(line_b), "RX %lu packets / %lu bytes",
                  (unsigned long)g_usb_rx_packets,
                  (unsigned long)g_usb_rx_bytes);
-        snprintf(line_c, sizeof(line_c), "T-Deck companion profile stays on USB CDC.");
+        snprintf(line_c, sizeof(line_c), "Grove TX %lu | last %s",
+                 (unsigned long)g_grove_tx_packets,
+                 g_grove_last_tx);
         add_app_status_line(card, "Bridge", line_a, width - 32, 0xf0bf4f);
         add_app_status_line(card, "Serial", line_b, width - 32, 0xf1f7f3);
         add_app_status_line(card, "Profile", line_c, width - 32, 0x93a6ad);
@@ -3072,13 +3086,17 @@ static void render_active_app_page_locked(void)
                  g_ir_probe_ready ? "ready" : "pending",
                  g_ir_level,
                  (unsigned long)g_ir_edges);
-        snprintf(line_b, sizeof(line_b), "Grove RX GPIO%u TX GPIO%u",
+        snprintf(line_b, sizeof(line_b), "TX %lu | last %s 0x%02lx",
+                 (unsigned long)g_ir_tx_count,
+                 g_ir_last_command,
+                 (unsigned long)g_ir_last_code);
+        snprintf(line_c, sizeof(line_c), "GPIO RX%u TX%u | log %s",
                  (unsigned)TABFORGE_IR_RX_GPIO,
-                 (unsigned)TABFORGE_IR_TX_GPIO);
-        snprintf(line_c, sizeof(line_c), "Event log: %s", g_sd_ready ? "enabled" : "SD missing");
+                 (unsigned)TABFORGE_IR_TX_GPIO,
+                 g_sd_ready ? "SD" : "off");
         add_app_status_line(card, "Receiver", line_a, width - 32, 0xff7a66);
-        add_app_status_line(card, "Pins", line_b, width - 32, 0xf1f7f3);
-        add_app_status_line(card, "Storage", line_c, width - 32, 0x93a6ad);
+        add_app_status_line(card, "Remote", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Pins", line_c, width - 32, 0x93a6ad);
         break;
     case APP_RECORDER:
         snprintf(line_a, sizeof(line_a), "%s | avg %d | peak %d", mic_state_text(), g_mic_average, g_mic_peak);
@@ -3540,6 +3558,12 @@ static void init_power_management(void)
     }
 }
 
+static void IRAM_ATTR ir_rx_edge_isr(void *arg)
+{
+    (void)arg;
+    g_ir_edges++;
+}
+
 static void init_ir_probe(void)
 {
     gpio_config_t rx_config = {
@@ -3547,7 +3571,7 @@ static void init_ir_probe(void)
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .intr_type = GPIO_INTR_ANYEDGE,
     };
     esp_err_t err = gpio_config(&rx_config);
     if (err != ESP_OK) {
@@ -3571,6 +3595,18 @@ static void init_ir_probe(void)
     }
 
     gpio_set_level(TABFORGE_IR_TX_GPIO, 0);
+    err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TABFORGE_TAG, "IR RX ISR service install failed: %s", esp_err_to_name(err));
+    } else if (!g_ir_isr_attached) {
+        err = gpio_isr_handler_add(TABFORGE_IR_RX_GPIO, ir_rx_edge_isr, NULL);
+        if (err == ESP_OK) {
+            g_ir_isr_attached = true;
+        } else {
+            ESP_LOGW(TABFORGE_TAG, "IR RX ISR handler add failed: %s", esp_err_to_name(err));
+        }
+    }
+
     g_ir_level = gpio_get_level(TABFORGE_IR_RX_GPIO);
     g_ir_probe_ready = true;
     append_event("ir_probe_started");

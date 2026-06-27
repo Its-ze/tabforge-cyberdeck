@@ -9,6 +9,7 @@ idf_component_register(
         esp-tls
         esp_wifi
         driver
+        esp_driver_rmt
         esp_io_expander
         esp_event
         esp_netif
