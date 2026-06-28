@@ -8,6 +8,7 @@ $DocsDir = Join-Path $Root "docs"
 $AppsDir = Join-Path $DocsDir "apps"
 $CatalogPath = Join-Path $DocsDir "app-store.json"
 $BaseUrl = "https://its-ze.github.io/tabforge-cyberdeck"
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 function Copy-Value {
   param($Object, [string]$Name, [object]$Default = "")
@@ -24,11 +25,21 @@ function Assert-SafeId {
   }
 }
 
+function Normalize-JsonFile {
+  param([string]$Path)
+  $raw = Get-Content -LiteralPath $Path -Raw
+  $normalized = $raw -replace "`r`n", "`n" -replace "`r", "`n"
+  if ($normalized -ne $raw) {
+    [System.IO.File]::WriteAllText($Path, $normalized, $Utf8NoBom)
+  }
+  return $normalized
+}
+
 $apps = New-Object System.Collections.Generic.List[object]
 $packageFiles = Get-ChildItem -LiteralPath $AppsDir -File -Filter "*.json" | Sort-Object Name
 
 foreach ($file in $packageFiles) {
-  $raw = Get-Content -LiteralPath $file.FullName -Raw
+  $raw = Normalize-JsonFile -Path $file.FullName
   $package = $raw | ConvertFrom-Json
   Assert-SafeId -Id $package.id -Path $file.FullName
 
@@ -94,7 +105,6 @@ $catalog = [ordered]@{
   apps = $appArray
 }
 
-$catalogJson = $catalog | ConvertTo-Json -Depth 10
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($CatalogPath, $catalogJson + [Environment]::NewLine, $utf8NoBom)
+$catalogJson = ($catalog | ConvertTo-Json -Depth 10) -replace "`r`n", "`n" -replace "`r", "`n"
+[System.IO.File]::WriteAllText($CatalogPath, $catalogJson + "`n", $Utf8NoBom)
 Write-Host "Updated docs/app-store.json with $($apps.Count) apps."

@@ -23,6 +23,7 @@ function Resolve-ProjectPath {
 }
 
 $requiredPaths = @(
+  ".gitattributes",
   "README.md",
   "config\app-catalog.json",
   "config\device-profiles.json",
@@ -131,6 +132,14 @@ if (Test-Path -LiteralPath $manifestPath) {
 
 $appCatalogPath = Resolve-ProjectPath "docs\app-store.json"
 if (Test-Path -LiteralPath $appCatalogPath) {
+  $catalogBytes = [System.IO.File]::ReadAllBytes($appCatalogPath)
+  for ($i = 0; $i -lt ($catalogBytes.Length - 1); $i++) {
+    if ($catalogBytes[$i] -eq 13 -and $catalogBytes[$i + 1] -eq 10) {
+      Add-CheckError "docs\app-store.json must use LF line endings so published app hashes stay deterministic."
+      break
+    }
+  }
+
   $catalog = Get-Content -LiteralPath $appCatalogPath -Raw | ConvertFrom-Json
   if ($catalog.project -ne "tabforge-cyberdeck") {
     Add-CheckError "docs\app-store.json project must be tabforge-cyberdeck."
@@ -152,6 +161,14 @@ if (Test-Path -LiteralPath $appCatalogPath) {
     if (-not (Test-Path -LiteralPath $packagePath)) {
       Add-CheckError "App package missing for catalog entry: $($app.id)"
       continue
+    }
+
+    $packageBytes = [System.IO.File]::ReadAllBytes($packagePath)
+    for ($i = 0; $i -lt ($packageBytes.Length - 1); $i++) {
+      if ($packageBytes[$i] -eq 13 -and $packageBytes[$i + 1] -eq 10) {
+        Add-CheckError "App package $($app.id) must use LF line endings so SHA256 matches GitHub Pages bytes."
+        break
+      }
     }
 
     $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json

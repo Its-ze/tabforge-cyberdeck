@@ -1,0 +1,4 @@
+* text=auto
+
+docs/app-store.json text eol=lf
+docs/apps/*.json text eol=lf
