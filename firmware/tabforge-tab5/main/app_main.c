@@ -6624,11 +6624,13 @@ static void build_pages(lv_obj_t *parent, lv_coord_t width, lv_coord_t height, b
     lv_obj_set_size(pages, width, height);
     lv_obj_clear_flag(pages, LV_OBJ_FLAG_SCROLLABLE);
 
+    g_ui.page_home = make_page(pages, width, height);
     g_ui.page_apps = make_page(pages, width, height);
     g_ui.page_settings = make_page(pages, width, height);
     g_ui.page_update = make_page(pages, width, height);
     g_ui.page_app = make_page(pages, width, height);
 
+    build_home_page(g_ui.page_home, width, height, landscape);
     build_app_grid(g_ui.page_apps, width, height, landscape);
     build_settings_page(g_ui.page_settings, width, height, landscape);
     build_update_page(g_ui.page_update, width, height, landscape);
@@ -6645,11 +6647,11 @@ static void build_body(lv_obj_t *screen, lv_coord_t width, lv_coord_t height, bo
     lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(body, 10, 0);
 
-    lv_coord_t header_h = landscape ? 86 : 112;
-    lv_coord_t quick_h = width >= 640 ? 126 : 248;
+    lv_coord_t header_h = landscape ? 76 : 102;
+    lv_coord_t quick_h = landscape && width >= 900 ? 74 : 136;
     lv_coord_t apps_h = height - header_h - quick_h - 20;
-    if (apps_h < 300) {
-        apps_h = 300;
+    if (apps_h < 280) {
+        apps_h = 280;
     }
 
     build_home_header(body, width, header_h);
@@ -6668,7 +6670,7 @@ static void build_dock(lv_obj_t *screen, lv_coord_t width, lv_coord_t height)
     lv_obj_set_style_pad_all(dock, 8, 0);
 
     lv_coord_t button_w = (width - 64) / 5;
-    g_ui.nav_apps = make_nav_button(dock, button_w, LV_SYMBOL_LIST, "Home", apps_button_event_cb);
+    g_ui.nav_apps = make_nav_button(dock, button_w, LV_SYMBOL_HOME, "Home", home_button_event_cb);
     g_ui.nav_settings = make_nav_button(dock, button_w, LV_SYMBOL_SETTINGS, "Settings", settings_button_event_cb);
     g_ui.nav_mode = make_nav_button(dock, button_w, LV_SYMBOL_SHUFFLE, "Mesh", mode_button_event_cb);
     g_ui.nav_auto = make_nav_button(dock, button_w, LV_SYMBOL_REFRESH, "Auto", auto_rotate_button_event_cb);
