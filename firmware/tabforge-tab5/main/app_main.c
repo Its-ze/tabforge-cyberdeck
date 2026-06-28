@@ -454,6 +454,10 @@ static uint32_t g_app_store_installed_count;
 static esp_err_t g_app_store_last_error = ESP_OK;
 static char g_app_store_last_status[TABFORGE_APP_SUMMARY_LEN] = "Fetch the GitHub app catalog.";
 static char g_app_store_last_hash[TABFORGE_APP_SHA_LEN] = "";
+static char g_app_store_installed_version[TABFORGE_APP_VERSION_LEN] = "";
+static char g_app_store_installed_hash[TABFORGE_APP_SHA_LEN] = "";
+static bool g_app_store_selected_installed;
+static bool g_app_store_selected_update_available;
 static bool g_mini_app_running;
 static uint8_t g_mini_app_action_count;
 static char g_mini_app_status[TABFORGE_APP_SUMMARY_LEN] = "Launch an installed mini app.";
@@ -553,6 +557,7 @@ static void grove_uart_send_line(const char *line);
 static bool grove_uart_send_bytes(const uint8_t *data, size_t data_len, const char *label);
 static bool usb_cdc_send_bytes(const uint8_t *data, size_t data_len, const char *label);
 static void request_active_app_refresh(void);
+static int compare_versions(const char *left, const char *right);
 static axis3_t g_last_acce;
 static axis3_t g_last_gyro;
 static uint64_t g_last_imu_ms;
@@ -2906,6 +2911,81 @@ static void app_store_refresh_installed_count(void)
     fclose(f);
 }
 
+static bool app_store_get_installed_record(const char *id,
+                                           char *version,
+                                           size_t version_size,
+                                           char *sha256,
+                                           size_t sha256_size)
+{
+    if (version != NULL && version_size > 0U) {
+        version[0] = '\0';
+    }
+    if (sha256 != NULL && sha256_size > 0U) {
+        sha256[0] = '\0';
+    }
+    if (!g_sd_ready || id == NULL || id[0] == '\0') {
+        return false;
+    }
+
+    FILE *f = fopen(TABFORGE_APP_INSTALLED_INDEX_PATH, "r");
+    if (f == NULL) {
+        return false;
+    }
+
+    bool found = false;
+    char line[256];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        cJSON *root = cJSON_Parse(line);
+        if (root == NULL) {
+            continue;
+        }
+
+        char record_id[TABFORGE_APP_ID_LEN] = "";
+        copy_json_string(root, "id", record_id, sizeof(record_id));
+        if (strcmp(record_id, id) == 0) {
+            if (version != NULL && version_size > 0U) {
+                copy_json_string(root, "version", version, version_size);
+            }
+            if (sha256 != NULL && sha256_size > 0U) {
+                copy_json_string(root, "sha256", sha256, sha256_size);
+            }
+            found = true;
+        }
+        cJSON_Delete(root);
+    }
+    fclose(f);
+    return found;
+}
+
+static void app_store_refresh_selected_install_state(void)
+{
+    g_app_store_selected_installed = false;
+    g_app_store_selected_update_available = false;
+    g_app_store_installed_version[0] = '\0';
+    g_app_store_installed_hash[0] = '\0';
+
+    if (g_app_store_selected.id[0] == '\0') {
+        return;
+    }
+
+    g_app_store_selected_installed = app_store_get_installed_record(g_app_store_selected.id,
+                                                                    g_app_store_installed_version,
+                                                                    sizeof(g_app_store_installed_version),
+                                                                    g_app_store_installed_hash,
+                                                                    sizeof(g_app_store_installed_hash));
+    if (!g_app_store_selected_installed) {
+        return;
+    }
+
+    if (compare_versions(g_app_store_selected.version, g_app_store_installed_version) > 0) {
+        g_app_store_selected_update_available = true;
+    } else if (g_app_store_selected.sha256[0] != '\0' &&
+               g_app_store_installed_hash[0] != '\0' &&
+               strncmp(g_app_store_selected.sha256, g_app_store_installed_hash, TABFORGE_APP_SHA_LEN) != 0) {
+        g_app_store_selected_update_available = true;
+    }
+}
+
 static bool app_store_copy_entry(cJSON *item, app_store_entry_t *entry)
 {
     if (!cJSON_IsObject(item) || entry == NULL) {
@@ -2971,6 +3051,9 @@ static esp_err_t app_store_parse_manifest(const char *manifest, uint32_t selecte
 
     g_app_store_count = (uint32_t)count;
     cJSON_Delete(root);
+    if (found) {
+        app_store_refresh_selected_install_state();
+    }
     return found ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
 }
 
@@ -3080,6 +3163,9 @@ static void app_store_install_task(void *arg)
             return;
         }
     }
+    app_store_refresh_selected_install_state();
+    bool was_update = g_app_store_selected_update_available;
+    bool was_reinstall = g_app_store_selected_installed && !was_update;
 
     g_app_store_state = APP_STORE_INSTALLING;
     g_app_store_last_error = ESP_OK;
@@ -3135,13 +3221,15 @@ static void app_store_install_task(void *arg)
 
     if (err == ESP_OK) {
         app_store_refresh_installed_count();
+        app_store_refresh_selected_install_state();
         g_app_store_state = APP_STORE_INSTALLED;
         snprintf(g_app_store_last_status,
                  sizeof(g_app_store_last_status),
-                 "Installed %.31s to /tabforge/apps.",
+                 "%s %.31s to /tabforge/apps.",
+                 was_update ? "Updated" : (was_reinstall ? "Reinstalled" : "Installed"),
                  g_app_store_selected.name);
-        append_event("app_store_app_installed");
-        update_activity_from_task("App Installed", g_app_store_selected.name);
+        append_event(was_update ? "app_store_app_updated" : "app_store_app_installed");
+        update_activity_from_task(was_update ? "App Updated" : "App Installed", g_app_store_selected.name);
     } else {
         g_app_store_state = APP_STORE_ERROR;
         g_app_store_last_error = err;
@@ -4876,6 +4964,7 @@ static void render_mesh_messenger_locked(lv_obj_t *card, lv_coord_t width, bool 
 static void render_app_store_locked(lv_obj_t *card, lv_coord_t width)
 {
     app_store_refresh_installed_count();
+    app_store_refresh_selected_install_state();
 
     char line[192];
     if (g_mini_app_running) {
@@ -4914,20 +5003,29 @@ static void render_app_store_locked(lv_obj_t *card, lv_coord_t width)
 
     snprintf(line,
              sizeof(line),
-             "%s | catalog %lu | installed %lu",
+             "%s | catalog %lu | installed %lu | %s",
              app_store_state_text(),
              (unsigned long)g_app_store_count,
-             (unsigned long)g_app_store_installed_count);
+             (unsigned long)g_app_store_installed_count,
+             g_app_store_selected_update_available ? "update ready" : "current");
     add_app_status_line(card, "Store", line, width, 0x5ec8ff);
 
     snprintf(line,
              sizeof(line),
-             "%lu/%lu %.47s v%.23s",
+             "%lu/%lu %.47s catalog v%.23s",
              g_app_store_count > 0 ? (unsigned long)(g_app_store_selected_index + 1U) : 0UL,
              (unsigned long)g_app_store_count,
              g_app_store_selected.name[0] != '\0' ? g_app_store_selected.name : "No app selected",
              g_app_store_selected.version[0] != '\0' ? g_app_store_selected.version : "-");
     add_app_status_line(card, "Selected", line, width, 0xf1f7f3);
+
+    snprintf(line,
+             sizeof(line),
+             "%s | installed v%.23s | %.64s",
+             g_app_store_selected_update_available ? "update available" : (g_app_store_selected_installed ? "installed" : "not installed"),
+             g_app_store_installed_version[0] != '\0' ? g_app_store_installed_version : "-",
+             g_app_store_installed_hash[0] != '\0' ? g_app_store_installed_hash : "no local hash");
+    add_app_status_line(card, "Local", line, width, g_app_store_selected_update_available ? 0xffc857 : 0x77dd88);
 
     snprintf(line,
              sizeof(line),
@@ -5058,7 +5156,10 @@ static void add_app_actions(lv_obj_t *parent,
         } else {
             make_button(actions, button_w, "Fetch", app_store_fetch_button_event_cb);
             make_button(actions, button_w, "Next App", app_store_next_button_event_cb);
-            make_button(actions, button_w, "Install", app_store_install_button_event_cb);
+            make_button(actions,
+                        button_w,
+                        g_app_store_selected_update_available ? "Update App" : (g_app_store_selected_installed ? "Reinstall" : "Install"),
+                        app_store_install_button_event_cb);
             make_button(actions, button_w, "Launch", app_store_launch_button_event_cb);
             make_button(actions, button_w, "SD Apps", app_store_sd_button_event_cb);
             make_button(actions, button_w, "Wi-Fi", update_button_event_cb);
