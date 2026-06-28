@@ -6,6 +6,7 @@ idf_component_register(
     REQUIRES
         app_update
         esp_http_client
+        esp_http_server
         esp-tls
         esp_wifi
         driver

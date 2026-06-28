@@ -15,11 +15,13 @@
 #include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
+#include "esp_http_server.h"
 #include "esp_heap_caps.h"
 #include "esp_io_expander.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -170,6 +172,11 @@
 #define TABFORGE_CARDPUTER_COMMAND_LEN 32
 #define TABFORGE_CARDPUTER_APP_LEN 24
 #define TABFORGE_CARDPUTER_ACTION_LEN 40
+#define TABFORGE_COMPANION_BODY_MAX 1536
+#define TABFORGE_COMPANION_TOKEN_LEN 33
+#define TABFORGE_COMPANION_NAME_LEN 48
+#define TABFORGE_COMPANION_SOURCE_LEN 32
+#define TABFORGE_COMPANION_TIME_LEN 48
 #define MESHTASTIC_STREAM_START1 0x94
 #define MESHTASTIC_STREAM_START2 0xC3
 #define MESHTASTIC_MAX_PROTO_LEN 512
@@ -408,6 +415,25 @@ typedef struct {
     bool active;
 } cardputer_line_state_t;
 
+typedef struct {
+    bool paired;
+    char token[TABFORGE_COMPANION_TOKEN_LEN];
+    char phone_name[TABFORGE_COMPANION_NAME_LEN];
+    uint32_t pair_count;
+    uint32_t request_count;
+    bool location_ready;
+    double latitude;
+    double longitude;
+    double altitude_m;
+    double accuracy_m;
+    double speed_mps;
+    double heading_deg;
+    char source[TABFORGE_COMPANION_SOURCE_LEN];
+    char timestamp[TABFORGE_COMPANION_TIME_LEN];
+    uint32_t location_count;
+    uint64_t location_updated_ms;
+} companion_state_t;
+
 static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_WIFI, "Wi-Fi", "Scan, connect, and prepare internet OTA.", "Internet", "tile_wifi", APP_WIFI, FEATURE_ACTIVE, 0x70a7ff},
     {LV_SYMBOL_ENVELOPE, "Messages", "Meshtastic C6L channel text and direct sends.", "Grove", "tile_meshtastic", APP_MESSAGES, FEATURE_ACTIVE, 0x43d17a},
@@ -637,6 +663,8 @@ static bool g_accessory_probe_started;
 static uint8_t g_accessory_i2c_count;
 static bool g_accessory_pahub_ready;
 static char g_accessory_i2c_summary[96] = "not scanned";
+static httpd_handle_t g_companion_server;
+static companion_state_t g_companion;
 
 #if BSP_CAPS_IMU
 static sensor_handle_t g_imu_sensor_handle;
@@ -662,6 +690,7 @@ static bool cardputer_keyboard_present(void);
 static void apply_cardputer_pending_command_locked(void);
 static void apply_cardputer_pending_input_locked(void);
 static const feature_tile_t *find_tile_by_app(app_id_t app_id);
+static void start_companion_api_server(void);
 static axis3_t g_last_acce;
 static axis3_t g_last_gyro;
 static uint64_t g_last_imu_ms;
@@ -3533,6 +3562,90 @@ static esp_err_t app_store_select_from_cache(uint32_t selected_index)
     return err;
 }
 
+static esp_err_t app_store_select_by_id_from_manifest(const char *manifest, const char *id)
+{
+    if (manifest == NULL || id == NULL || id[0] == '\0' || !app_store_id_is_safe(id)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *root = cJSON_Parse(manifest);
+    if (root == NULL) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    cJSON *apps = cJSON_GetObjectItemCaseSensitive(root, "apps");
+    int count = cJSON_IsArray(apps) ? cJSON_GetArraySize(apps) : 0;
+    if (count <= 0) {
+        cJSON_Delete(root);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    app_store_entry_t candidate;
+    bool found = false;
+    uint32_t selected_index = 0;
+    for (int i = 0; i < count; ++i) {
+        cJSON *item = cJSON_GetArrayItem(apps, i);
+        if (app_store_copy_entry(item, &candidate) && strcmp(candidate.id, id) == 0) {
+            g_app_store_selected = candidate;
+            selected_index = (uint32_t)i;
+            found = true;
+            break;
+        }
+    }
+
+    g_app_store_count = (uint32_t)count;
+    cJSON_Delete(root);
+    if (!found) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    g_app_store_selected_index = selected_index;
+    app_store_refresh_selected_install_state();
+    return ESP_OK;
+}
+
+static esp_err_t app_store_select_by_id_from_cache(const char *id)
+{
+    if (!g_sd_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char *manifest = heap_caps_malloc(TABFORGE_APP_STORE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    if (manifest == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = read_sd_text_file(TABFORGE_APP_STORE_PATH, manifest, TABFORGE_APP_STORE_MAX_BYTES);
+    if (err == ESP_OK) {
+        err = app_store_select_by_id_from_manifest(manifest, id);
+    }
+    heap_caps_free(manifest);
+    return err;
+}
+
+static esp_err_t app_store_select_by_id_fetching_if_needed(const char *id)
+{
+    esp_err_t err = app_store_select_by_id_from_cache(id);
+    if (err == ESP_OK || !g_wifi_has_ip) {
+        return err;
+    }
+
+    char *manifest = heap_caps_malloc(TABFORGE_APP_STORE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    if (manifest == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    err = http_get_to_buffer(g_app_store_manifest_url, manifest, TABFORGE_APP_STORE_MAX_BYTES);
+    if (err == ESP_OK) {
+        err = app_store_select_by_id_from_manifest(manifest, id);
+    }
+    if (err == ESP_OK && g_sd_ready) {
+        (void)write_sd_text_file(TABFORGE_APP_STORE_PATH, manifest);
+    }
+    heap_caps_free(manifest);
+    return err;
+}
+
 static void app_store_fetch_task(void *arg)
 {
     (void)arg;
@@ -4108,6 +4221,481 @@ static void ota_update_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static void companion_set_cors(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, X-TabForge-Token");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+}
+
+static esp_err_t companion_send_json(httpd_req_t *req, cJSON *root)
+{
+    if (root == NULL) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "json allocation failed");
+    }
+
+    char *payload = cJSON_PrintUnformatted(root);
+    if (payload == NULL) {
+        cJSON_Delete(root);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "json print failed");
+    }
+
+    companion_set_cors(req);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, payload);
+    cJSON_free(payload);
+    cJSON_Delete(root);
+    return err;
+}
+
+static esp_err_t companion_send_error(httpd_req_t *req,
+                                      const char *status,
+                                      const char *error,
+                                      const char *detail)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (root != NULL) {
+        cJSON_AddBoolToObject(root, "ok", false);
+        cJSON_AddStringToObject(root, "error", error != NULL ? error : "error");
+        cJSON_AddStringToObject(root, "detail", detail != NULL ? detail : "");
+    }
+    companion_set_cors(req);
+    httpd_resp_set_status(req, status != NULL ? status : "400 Bad Request");
+    return companion_send_json(req, root);
+}
+
+static cJSON *companion_read_json_body(httpd_req_t *req)
+{
+    if (req->content_len == 0) {
+        return cJSON_CreateObject();
+    }
+    if (req->content_len >= TABFORGE_COMPANION_BODY_MAX) {
+        return NULL;
+    }
+
+    char body[TABFORGE_COMPANION_BODY_MAX];
+    size_t received_total = 0;
+    while (received_total < req->content_len) {
+        int received = httpd_req_recv(req,
+                                      body + received_total,
+                                      (int)(req->content_len - received_total));
+        if (received <= 0) {
+            return NULL;
+        }
+        received_total += (size_t)received;
+    }
+    body[received_total] = '\0';
+
+    cJSON *root = cJSON_Parse(body);
+    return root != NULL ? root : cJSON_CreateObject();
+}
+
+static void companion_generate_token(char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size < TABFORGE_COMPANION_TOKEN_LEN) {
+        return;
+    }
+
+    snprintf(buffer,
+             buffer_size,
+             "%08lx%08lx%08lx%08lx",
+             (unsigned long)esp_random(),
+             (unsigned long)esp_random(),
+             (unsigned long)esp_random(),
+             (unsigned long)now_ms_u32());
+}
+
+static bool companion_authorized(httpd_req_t *req, cJSON *body)
+{
+    if (!g_companion.paired || g_companion.token[0] == '\0') {
+        return true;
+    }
+
+    char token[TABFORGE_COMPANION_TOKEN_LEN] = "";
+    if (httpd_req_get_hdr_value_str(req, "X-TabForge-Token", token, sizeof(token)) != ESP_OK && body != NULL) {
+        copy_json_string(body, "token", token, sizeof(token));
+    }
+    return token[0] != '\0' && strcmp(token, g_companion.token) == 0;
+}
+
+static void companion_add_location_json(cJSON *root)
+{
+    cJSON *location = cJSON_AddObjectToObject(root, "phoneLocation");
+    if (location == NULL) {
+        return;
+    }
+
+    cJSON_AddBoolToObject(location, "ready", g_companion.location_ready);
+    cJSON_AddNumberToObject(location, "count", g_companion.location_count);
+    cJSON_AddNumberToObject(location, "updatedMs", (double)g_companion.location_updated_ms);
+    if (g_companion.location_ready) {
+        cJSON_AddNumberToObject(location, "latitude", g_companion.latitude);
+        cJSON_AddNumberToObject(location, "longitude", g_companion.longitude);
+        cJSON_AddNumberToObject(location, "altitudeM", g_companion.altitude_m);
+        cJSON_AddNumberToObject(location, "accuracyM", g_companion.accuracy_m);
+        cJSON_AddNumberToObject(location, "speedMps", g_companion.speed_mps);
+        cJSON_AddNumberToObject(location, "headingDeg", g_companion.heading_deg);
+        cJSON_AddStringToObject(location, "source", g_companion.source);
+        cJSON_AddStringToObject(location, "timestamp", g_companion.timestamp);
+    }
+}
+
+static void companion_add_app_store_json(cJSON *root)
+{
+    app_store_refresh_installed_count();
+    app_store_refresh_selected_install_state();
+
+    cJSON *apps = cJSON_AddObjectToObject(root, "apps");
+    if (apps == NULL) {
+        return;
+    }
+    cJSON_AddStringToObject(apps, "catalogUrl", g_app_store_manifest_url);
+    cJSON_AddStringToObject(apps, "state", app_store_state_text());
+    cJSON_AddStringToObject(apps, "lastStatus", g_app_store_last_status);
+    cJSON_AddStringToObject(apps, "lastError", esp_err_to_name(g_app_store_last_error));
+    cJSON_AddNumberToObject(apps, "catalogCount", g_app_store_count);
+    cJSON_AddNumberToObject(apps, "installedCount", g_app_store_installed_count);
+
+    cJSON *selected = cJSON_AddObjectToObject(apps, "selected");
+    if (selected != NULL) {
+        cJSON_AddStringToObject(selected, "id", g_app_store_selected.id);
+        cJSON_AddStringToObject(selected, "name", g_app_store_selected.name);
+        cJSON_AddStringToObject(selected, "summary", g_app_store_selected.summary);
+        cJSON_AddStringToObject(selected, "version", g_app_store_selected.version);
+        cJSON_AddBoolToObject(selected, "installed", g_app_store_selected_installed);
+        cJSON_AddBoolToObject(selected, "updateAvailable", g_app_store_selected_update_available);
+        cJSON_AddStringToObject(selected, "installedVersion", g_app_store_installed_version);
+        cJSON_AddStringToObject(selected, "installedHash", g_app_store_installed_hash);
+        cJSON_AddStringToObject(selected, "packageHash", g_app_store_selected.sha256);
+    }
+}
+
+static void companion_add_update_json(cJSON *root)
+{
+    cJSON *update = cJSON_AddObjectToObject(root, "update");
+    if (update == NULL) {
+        return;
+    }
+    cJSON_AddStringToObject(update, "currentVersion", TABFORGE_VERSION);
+    cJSON_AddStringToObject(update, "manifestUrl", g_ota_manifest_url);
+    cJSON_AddStringToObject(update, "state", ota_state_text());
+    cJSON_AddStringToObject(update, "lastError", esp_err_to_name(g_ota_last_error));
+    cJSON_AddStringToObject(update, "latestVersion", g_ota_version);
+    cJSON_AddStringToObject(update, "firmwareUrl", g_ota_firmware_url);
+    cJSON_AddStringToObject(update, "sha256", g_ota_sha256);
+    cJSON_AddNumberToObject(update, "size", g_ota_size);
+    cJSON_AddBoolToObject(update, "rebootPending", g_ota_reboot_pending);
+}
+
+static void companion_add_diagnostics_json(cJSON *root)
+{
+    char battery_status[32];
+    format_battery_status(battery_status, sizeof(battery_status), false);
+
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddStringToObject(root, "name", "TabForge Cyberdeck");
+    cJSON_AddStringToObject(root, "version", TABFORGE_VERSION);
+    cJSON_AddNumberToObject(root, "uptimeMs", (double)now_ms_u32());
+    cJSON_AddStringToObject(root, "ip", g_wifi_ip);
+
+    cJSON *wifi = cJSON_AddObjectToObject(root, "wifi");
+    if (wifi != NULL) {
+        cJSON_AddStringToObject(wifi, "state", wifi_state_text());
+        cJSON_AddStringToObject(wifi, "ssid", g_wifi_credentials.ssid);
+        cJSON_AddBoolToObject(wifi, "hasIp", g_wifi_has_ip);
+        cJSON_AddStringToObject(wifi, "ip", g_wifi_ip);
+        cJSON_AddStringToObject(wifi, "lastError", esp_err_to_name(g_wifi_last_error));
+    }
+
+    cJSON *pair = cJSON_AddObjectToObject(root, "pairing");
+    if (pair != NULL) {
+        cJSON_AddBoolToObject(pair, "paired", g_companion.paired);
+        cJSON_AddStringToObject(pair, "phoneName", g_companion.phone_name);
+        cJSON_AddNumberToObject(pair, "pairCount", g_companion.pair_count);
+        cJSON_AddNumberToObject(pair, "requestCount", g_companion.request_count);
+    }
+
+    cJSON *hardware = cJSON_AddObjectToObject(root, "hardware");
+    if (hardware != NULL) {
+        cJSON_AddBoolToObject(hardware, "sdReady", g_sd_ready);
+        cJSON_AddStringToObject(hardware, "sdError", esp_err_to_name(g_sd_last_error));
+        cJSON_AddBoolToObject(hardware, "imuReady", g_imu_ready);
+        cJSON_AddStringToObject(hardware, "imuError", esp_err_to_name(g_imu_last_error));
+        cJSON_AddStringToObject(hardware, "mic", mic_state_text());
+        cJSON_AddStringToObject(hardware, "usb", usb_state_text());
+        cJSON_AddStringToObject(hardware, "sdr", sdr_state_text());
+        cJSON_AddBoolToObject(hardware, "groveReady", g_grove_uart_ready);
+        cJSON_AddBoolToObject(hardware, "irReady", g_ir_probe_ready);
+        cJSON_AddStringToObject(hardware, "battery", battery_status);
+        cJSON_AddNumberToObject(hardware, "batteryPercent", g_battery_percent);
+        cJSON_AddNumberToObject(hardware, "batteryMv", g_battery_mv);
+        cJSON_AddStringToObject(hardware, "rotation", rotation_name(g_rotation));
+    }
+
+    cJSON *mesh = cJSON_AddObjectToObject(root, "mesh");
+    if (mesh != NULL) {
+        cJSON_AddStringToObject(mesh, "mode", selected_mesh_profile_name());
+        cJSON_AddStringToObject(mesh, "transport", g_mesh_last_transport);
+        cJSON_AddBoolToObject(mesh, "gpsShare", g_mesh_gps_share_enabled);
+        cJSON_AddNumberToObject(mesh, "sent", g_mesh_sent_count);
+        cJSON_AddNumberToObject(mesh, "received", g_mesh_received_count);
+        cJSON_AddNumberToObject(mesh, "apiTxFrames", g_meshtastic_api_tx_frames);
+        cJSON_AddNumberToObject(mesh, "apiRxFrames", g_meshtastic_api_rx_frames);
+    }
+
+    companion_add_location_json(root);
+    companion_add_app_store_json(root);
+    companion_add_update_json(root);
+}
+
+static esp_err_t companion_status_handler(httpd_req_t *req)
+{
+    g_companion.request_count++;
+    cJSON *root = cJSON_CreateObject();
+    companion_add_diagnostics_json(root);
+    return companion_send_json(req, root);
+}
+
+static esp_err_t companion_pair_handler(httpd_req_t *req)
+{
+    g_companion.request_count++;
+    cJSON *body = companion_read_json_body(req);
+    if (body == NULL) {
+        return companion_send_error(req, "400 Bad Request", "invalid_body", "Pair request body is too large or unreadable.");
+    }
+
+    char phone_name[TABFORGE_COMPANION_NAME_LEN] = "Phone";
+    copy_json_string(body, "name", phone_name, sizeof(phone_name));
+    if (g_companion.token[0] == '\0') {
+        companion_generate_token(g_companion.token, sizeof(g_companion.token));
+    }
+    strlcpy(g_companion.phone_name, phone_name, sizeof(g_companion.phone_name));
+    g_companion.paired = true;
+    g_companion.pair_count++;
+    append_event("companion_phone_paired");
+    update_activity_from_task("Phone Paired", g_companion.phone_name);
+
+    cJSON_Delete(body);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddStringToObject(root, "token", g_companion.token);
+    cJSON_AddStringToObject(root, "phoneName", g_companion.phone_name);
+    cJSON_AddStringToObject(root, "tabIp", g_wifi_ip);
+    cJSON_AddStringToObject(root, "version", TABFORGE_VERSION);
+    return companion_send_json(req, root);
+}
+
+static esp_err_t companion_location_handler(httpd_req_t *req)
+{
+    g_companion.request_count++;
+    cJSON *body = companion_read_json_body(req);
+    if (body == NULL) {
+        return companion_send_error(req, "400 Bad Request", "invalid_body", "Location request body is too large or unreadable.");
+    }
+    if (!companion_authorized(req, body)) {
+        cJSON_Delete(body);
+        return companion_send_error(req, "401 Unauthorized", "unauthorized", "Pair the phone again.");
+    }
+
+    cJSON *lat = cJSON_GetObjectItemCaseSensitive(body, "lat");
+    cJSON *lon = cJSON_GetObjectItemCaseSensitive(body, "lon");
+    if (!cJSON_IsNumber(lat) || !cJSON_IsNumber(lon)) {
+        cJSON_Delete(body);
+        return companion_send_error(req, "400 Bad Request", "invalid_location", "lat and lon are required.");
+    }
+
+    g_companion.latitude = lat->valuedouble;
+    g_companion.longitude = lon->valuedouble;
+    cJSON *alt = cJSON_GetObjectItemCaseSensitive(body, "altitude");
+    cJSON *accuracy = cJSON_GetObjectItemCaseSensitive(body, "accuracy");
+    cJSON *speed = cJSON_GetObjectItemCaseSensitive(body, "speed");
+    cJSON *heading = cJSON_GetObjectItemCaseSensitive(body, "heading");
+    g_companion.altitude_m = cJSON_IsNumber(alt) ? alt->valuedouble : 0.0;
+    g_companion.accuracy_m = cJSON_IsNumber(accuracy) ? accuracy->valuedouble : 0.0;
+    g_companion.speed_mps = cJSON_IsNumber(speed) ? speed->valuedouble : 0.0;
+    g_companion.heading_deg = cJSON_IsNumber(heading) ? heading->valuedouble : 0.0;
+    copy_json_string(body, "source", g_companion.source, sizeof(g_companion.source));
+    copy_json_string(body, "timestamp", g_companion.timestamp, sizeof(g_companion.timestamp));
+    if (g_companion.source[0] == '\0') {
+        strlcpy(g_companion.source, "phone", sizeof(g_companion.source));
+    }
+
+    g_companion.location_ready = true;
+    g_companion.location_count++;
+    g_companion.location_updated_ms = (uint64_t)now_ms_u32();
+    append_event("companion_location_updated");
+    update_activity_from_task("Phone GPS", "Location received from companion.");
+
+    cJSON_Delete(body);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    companion_add_location_json(root);
+    return companion_send_json(req, root);
+}
+
+static esp_err_t companion_apps_handler(httpd_req_t *req)
+{
+    g_companion.request_count++;
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    companion_add_app_store_json(root);
+    return companion_send_json(req, root);
+}
+
+static esp_err_t companion_apps_fetch_handler(httpd_req_t *req)
+{
+    g_companion.request_count++;
+    cJSON *body = companion_read_json_body(req);
+    if (body == NULL) {
+        return companion_send_error(req, "400 Bad Request", "invalid_body", "Fetch request body is too large or unreadable.");
+    }
+    if (!companion_authorized(req, body)) {
+        cJSON_Delete(body);
+        return companion_send_error(req, "401 Unauthorized", "unauthorized", "Pair the phone again.");
+    }
+    cJSON_Delete(body);
+
+    xTaskCreate(app_store_fetch_task, "tabforge-api-store-fetch", 8192, NULL, 5, NULL);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddStringToObject(root, "accepted", "fetch");
+    companion_add_app_store_json(root);
+    return companion_send_json(req, root);
+}
+
+static esp_err_t companion_apps_install_handler(httpd_req_t *req)
+{
+    g_companion.request_count++;
+    cJSON *body = companion_read_json_body(req);
+    if (body == NULL) {
+        return companion_send_error(req, "400 Bad Request", "invalid_body", "Install request body is too large or unreadable.");
+    }
+    if (!companion_authorized(req, body)) {
+        cJSON_Delete(body);
+        return companion_send_error(req, "401 Unauthorized", "unauthorized", "Pair the phone again.");
+    }
+
+    char id[TABFORGE_APP_ID_LEN] = "";
+    copy_json_string(body, "id", id, sizeof(id));
+    cJSON_Delete(body);
+    esp_err_t err = app_store_select_by_id_fetching_if_needed(id);
+    if (err != ESP_OK) {
+        return companion_send_error(req, "400 Bad Request", "app_not_selected", esp_err_to_name(err));
+    }
+
+    xTaskCreate(app_store_install_task, "tabforge-api-app-install", 8192, NULL, 5, NULL);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddStringToObject(root, "accepted", "install");
+    companion_add_app_store_json(root);
+    return companion_send_json(req, root);
+}
+
+static esp_err_t companion_update_check_handler(httpd_req_t *req)
+{
+    g_companion.request_count++;
+    cJSON *body = companion_read_json_body(req);
+    if (body == NULL) {
+        return companion_send_error(req, "400 Bad Request", "invalid_body", "Update request body is too large or unreadable.");
+    }
+    if (!companion_authorized(req, body)) {
+        cJSON_Delete(body);
+        return companion_send_error(req, "401 Unauthorized", "unauthorized", "Pair the phone again.");
+    }
+    cJSON_Delete(body);
+
+    if (!g_wifi_has_ip) {
+        return companion_send_error(req, "409 Conflict", "wifi_required", "Connect the Tab to Wi-Fi before checking updates.");
+    }
+
+    g_ota_state = OTA_STATE_FETCHING_MANIFEST;
+    g_ota_last_error = ESP_OK;
+    esp_err_t err = fetch_manifest_firmware_url();
+    g_ota_last_error = err;
+    if (err == ESP_OK) {
+        g_ota_state = OTA_STATE_IDLE;
+        update_activity_from_task("OTA Check", g_ota_version);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        g_ota_state = OTA_STATE_IDLE;
+        update_activity_from_task("OTA Check", "Current firmware is up to date.");
+    } else {
+        g_ota_state = OTA_STATE_ERROR;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", err == ESP_OK || err == ESP_ERR_INVALID_STATE);
+    cJSON_AddBoolToObject(root, "updateAvailable", err == ESP_OK);
+    cJSON_AddStringToObject(root, "result", err == ESP_OK ? "available" : (err == ESP_ERR_INVALID_STATE ? "current" : esp_err_to_name(err)));
+    companion_add_update_json(root);
+    return companion_send_json(req, root);
+}
+
+static esp_err_t companion_update_apply_handler(httpd_req_t *req)
+{
+    g_companion.request_count++;
+    cJSON *body = companion_read_json_body(req);
+    if (body == NULL) {
+        return companion_send_error(req, "400 Bad Request", "invalid_body", "OTA request body is too large or unreadable.");
+    }
+    if (!companion_authorized(req, body)) {
+        cJSON_Delete(body);
+        return companion_send_error(req, "401 Unauthorized", "unauthorized", "Pair the phone again.");
+    }
+    cJSON_Delete(body);
+
+    xTaskCreate(ota_update_task, "tabforge-api-ota", 8192, NULL, 5, NULL);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddStringToObject(root, "accepted", "ota");
+    companion_add_update_json(root);
+    return companion_send_json(req, root);
+}
+
+static void companion_register_uri(const char *uri, httpd_method_t method, esp_err_t (*handler)(httpd_req_t *req))
+{
+    httpd_uri_t route = {
+        .uri = uri,
+        .method = method,
+        .handler = handler,
+        .user_ctx = NULL,
+    };
+    esp_err_t err = httpd_register_uri_handler(g_companion_server, &route);
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "companion API route %s failed: %s", uri, esp_err_to_name(err));
+    }
+}
+
+static void start_companion_api_server(void)
+{
+    if (g_companion_server != NULL) {
+        return;
+    }
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 80;
+    config.lru_purge_enable = true;
+    config.stack_size = 6144;
+
+    esp_err_t err = httpd_start(&g_companion_server, &config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "companion API server start failed: %s", esp_err_to_name(err));
+        g_companion_server = NULL;
+        return;
+    }
+
+    companion_register_uri("/api/status", HTTP_GET, companion_status_handler);
+    companion_register_uri("/api/diagnostics", HTTP_GET, companion_status_handler);
+    companion_register_uri("/api/pair", HTTP_POST, companion_pair_handler);
+    companion_register_uri("/api/location", HTTP_POST, companion_location_handler);
+    companion_register_uri("/api/apps", HTTP_GET, companion_apps_handler);
+    companion_register_uri("/api/apps/fetch", HTTP_POST, companion_apps_fetch_handler);
+    companion_register_uri("/api/apps/install", HTTP_POST, companion_apps_install_handler);
+    companion_register_uri("/api/update/check", HTTP_POST, companion_update_check_handler);
+    companion_register_uri("/api/update/apply", HTTP_POST, companion_update_apply_handler);
+    append_event("companion_api_started");
+    ESP_LOGI(TABFORGE_TAG, "companion API server ready on http://%s/api/status", g_wifi_ip);
+}
+
 static void wifi_scan_button_event_cb(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
@@ -4320,14 +4908,18 @@ static void mesh_send_text_to_node(const char *text,
     }
 
     if (!sent && g_grove_uart_ready) {
-        char frame[256];
+        char frame[384];
         snprintf(frame,
                  sizeof(frame),
-                 "{\"tabforge\":\"mesh.text\",\"profile\":\"%s\",\"channel\":%u,\"to\":\"%.32s\",\"gps\":%s,\"voice\":%s,\"text\":\"%.96s\"}",
+                 "{\"tabforge\":\"mesh.text\",\"profile\":\"%s\",\"channel\":%u,\"to\":\"%.32s\",\"gps\":%s,\"phoneGps\":%s,\"lat\":%.7f,\"lon\":%.7f,\"acc\":%.1f,\"voice\":%s,\"text\":\"%.96s\"}",
                  selected_mesh_profile_name(),
                  (unsigned)channel->index,
                  node->node_id,
                  g_mesh_gps_share_enabled ? "true" : "false",
+                 (g_mesh_gps_share_enabled && g_companion.location_ready) ? "true" : "false",
+                 (g_mesh_gps_share_enabled && g_companion.location_ready) ? g_companion.latitude : 0.0,
+                 (g_mesh_gps_share_enabled && g_companion.location_ready) ? g_companion.longitude : 0.0,
+                 (g_mesh_gps_share_enabled && g_companion.location_ready) ? g_companion.accuracy_m : 0.0,
                  voice ? "true" : "false",
                  text);
         grove_uart_send_line(frame);
@@ -7877,6 +8469,7 @@ void app_main(void)
 
     esp_err_t imu_err = init_imu();
     init_wifi_station();
+    start_companion_api_server();
     if (imu_err != ESP_OK) {
 #if BSP_CAPS_IMU
         xTaskCreate(imu_retry_task, "tabforge-imu-retry", 4096, NULL, 4, NULL);
