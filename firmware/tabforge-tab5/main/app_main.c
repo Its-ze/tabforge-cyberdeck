@@ -147,6 +147,10 @@
 #define TABFORGE_APP_VERSION_LEN 24
 #define TABFORGE_APP_URL_LEN 192
 #define TABFORGE_APP_SHA_LEN 65
+#define TABFORGE_MINI_APP_MAX_ACTIONS 4
+#define TABFORGE_MINI_APP_LABEL_LEN 36
+#define TABFORGE_MINI_APP_MODE_LEN 32
+#define TABFORGE_MINI_APP_PROTOCOL_LEN 16
 #define MESHTASTIC_STREAM_START1 0x94
 #define MESHTASTIC_STREAM_START2 0xC3
 #define MESHTASTIC_MAX_PROTO_LEN 512
@@ -336,6 +340,21 @@ typedef struct {
 } app_store_entry_t;
 
 typedef struct {
+    char id[TABFORGE_APP_ID_LEN];
+    char label[TABFORGE_MINI_APP_LABEL_LEN];
+    char mode[TABFORGE_MINI_APP_MODE_LEN];
+    char protocol[TABFORGE_MINI_APP_PROTOCOL_LEN];
+    char to[32];
+    char text[TABFORGE_MESH_PREVIEW_LEN];
+    uint32_t address;
+    uint32_t command;
+    bool gps;
+    bool voice;
+    bool has_frame;
+    bool has_ir;
+} mini_app_action_t;
+
+typedef struct {
     uint8_t buffer[MESHTASTIC_MAX_FRAME_LEN];
     size_t length;
 } meshtastic_rx_state_t;
@@ -427,12 +446,17 @@ static uint32_t g_mesh_chat_sequence;
 static char g_app_store_manifest_url[TABFORGE_APP_URL_LEN] = TABFORGE_APP_STORE_URL;
 static app_store_state_t g_app_store_state = APP_STORE_IDLE;
 static app_store_entry_t g_app_store_selected;
+static app_store_entry_t g_mini_app_entry;
+static mini_app_action_t g_mini_app_actions[TABFORGE_MINI_APP_MAX_ACTIONS];
 static uint32_t g_app_store_count;
 static uint32_t g_app_store_selected_index;
 static uint32_t g_app_store_installed_count;
 static esp_err_t g_app_store_last_error = ESP_OK;
 static char g_app_store_last_status[TABFORGE_APP_SUMMARY_LEN] = "Fetch the GitHub app catalog.";
 static char g_app_store_last_hash[TABFORGE_APP_SHA_LEN] = "";
+static bool g_mini_app_running;
+static uint8_t g_mini_app_action_count;
+static char g_mini_app_status[TABFORGE_APP_SUMMARY_LEN] = "Launch an installed mini app.";
 static nav_page_t g_nav_page = NAV_PAGE_APPS;
 static app_id_t g_active_app = APP_NONE;
 static volatile bool g_active_app_refresh_requested;
@@ -3129,6 +3153,106 @@ static void app_store_install_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static bool parse_u32_text(const char *text, uint32_t *value)
+{
+    if (text == NULL || text[0] == '\0' || value == NULL) {
+        return false;
+    }
+
+    char *end = NULL;
+    unsigned long parsed = strtoul(text, &end, 0);
+    if (end == text || *end != '\0') {
+        return false;
+    }
+    *value = (uint32_t)parsed;
+    return true;
+}
+
+static void mini_app_clear(void)
+{
+    memset(&g_mini_app_entry, 0, sizeof(g_mini_app_entry));
+    memset(g_mini_app_actions, 0, sizeof(g_mini_app_actions));
+    g_mini_app_action_count = 0;
+    g_mini_app_running = false;
+}
+
+static void mini_app_copy_action(cJSON *item, mini_app_action_t *action, uint8_t index)
+{
+    if (!cJSON_IsObject(item) || action == NULL) {
+        return;
+    }
+
+    memset(action, 0, sizeof(*action));
+    copy_json_string(item, "id", action->id, sizeof(action->id));
+    copy_json_string(item, "label", action->label, sizeof(action->label));
+    copy_json_string(item, "mode", action->mode, sizeof(action->mode));
+    copy_json_string(item, "protocol", action->protocol, sizeof(action->protocol));
+    if (action->label[0] == '\0') {
+        snprintf(action->label, sizeof(action->label), "Action %u", (unsigned)(index + 1U));
+    }
+
+    cJSON *frame = cJSON_GetObjectItemCaseSensitive(item, "frame");
+    if (cJSON_IsObject(frame)) {
+        action->has_frame = true;
+        copy_json_string(frame, "to", action->to, sizeof(action->to));
+        copy_json_string(frame, "text", action->text, sizeof(action->text));
+        cJSON *gps = cJSON_GetObjectItemCaseSensitive(frame, "gps");
+        cJSON *voice = cJSON_GetObjectItemCaseSensitive(frame, "voice");
+        action->gps = cJSON_IsTrue(gps);
+        action->voice = cJSON_IsTrue(voice);
+    }
+    if (action->to[0] == '\0') {
+        strlcpy(action->to, "^all", sizeof(action->to));
+    }
+
+    char address_text[16] = "";
+    char command_text[16] = "";
+    copy_json_string(item, "address", address_text, sizeof(address_text));
+    copy_json_string(item, "command", command_text, sizeof(command_text));
+    if (action->protocol[0] != '\0' &&
+        parse_u32_text(address_text, &action->address) &&
+        parse_u32_text(command_text, &action->command)) {
+        action->has_ir = true;
+    }
+}
+
+static esp_err_t mini_app_load_package(const app_store_entry_t *entry, const char *package)
+{
+    if (entry == NULL || package == NULL || package[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *root = cJSON_Parse(package);
+    if (root == NULL) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    mini_app_clear();
+    g_mini_app_entry = *entry;
+    copy_json_string(root, "id", g_mini_app_entry.id, sizeof(g_mini_app_entry.id));
+    copy_json_string(root, "name", g_mini_app_entry.name, sizeof(g_mini_app_entry.name));
+    copy_json_string(root, "summary", g_mini_app_entry.summary, sizeof(g_mini_app_entry.summary));
+    copy_json_string(root, "version", g_mini_app_entry.version, sizeof(g_mini_app_entry.version));
+
+    cJSON *actions = cJSON_GetObjectItemCaseSensitive(root, "actions");
+    int action_count = cJSON_IsArray(actions) ? cJSON_GetArraySize(actions) : 0;
+    for (int i = 0; i < action_count && g_mini_app_action_count < TABFORGE_MINI_APP_MAX_ACTIONS; ++i) {
+        cJSON *item = cJSON_GetArrayItem(actions, i);
+        mini_app_copy_action(item, &g_mini_app_actions[g_mini_app_action_count], g_mini_app_action_count);
+        if (g_mini_app_actions[g_mini_app_action_count].label[0] != '\0') {
+            g_mini_app_action_count++;
+        }
+    }
+
+    g_mini_app_running = true;
+    snprintf(g_mini_app_status,
+             sizeof(g_mini_app_status),
+             "%u actions loaded from /tabforge/apps.",
+             (unsigned)g_mini_app_action_count);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
 static void app_store_launch_selected(void)
 {
     if (g_app_store_selected.id[0] == '\0') {
@@ -3140,6 +3264,40 @@ static void app_store_launch_selected(void)
             set_activity("App Store", g_app_store_last_status);
             return;
         }
+    }
+
+    if (!g_sd_ready) {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = ESP_ERR_INVALID_STATE;
+        strlcpy(g_app_store_last_status, "SD card is required to launch installed apps.", sizeof(g_app_store_last_status));
+        set_activity("App Store", g_app_store_last_status);
+        return;
+    }
+
+    char install_path[128];
+    snprintf(install_path, sizeof(install_path), TABFORGE_SD_ROOT "/tabforge/apps/%.31s.json", g_app_store_selected.id);
+    char *package = heap_caps_malloc(TABFORGE_APP_PACKAGE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    if (package == NULL) {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = ESP_ERR_NO_MEM;
+        strlcpy(g_app_store_last_status, "No memory to launch app.", sizeof(g_app_store_last_status));
+        set_activity("App Store", g_app_store_last_status);
+        return;
+    }
+
+    esp_err_t err = read_sd_text_file(install_path, package, TABFORGE_APP_PACKAGE_MAX_BYTES);
+    if (err == ESP_OK) {
+        err = mini_app_load_package(&g_app_store_selected, package);
+    }
+    heap_caps_free(package);
+
+    if (err != ESP_OK) {
+        g_app_store_state = APP_STORE_ERROR;
+        g_app_store_last_error = err;
+        snprintf(g_app_store_last_status, sizeof(g_app_store_last_status), "Install %.31s before launch.", g_app_store_selected.name);
+        set_activity("App Store", g_app_store_last_status);
+        request_active_app_refresh();
+        return;
     }
 
     char frame[160];
@@ -3154,6 +3312,7 @@ static void app_store_launch_selected(void)
              g_app_store_selected.name);
     set_activity("App Launch", g_app_store_last_status);
     append_event("app_store_app_launch");
+    request_active_app_refresh();
 }
 
 static bool parse_version_triplet(const char *version, int out[3])
@@ -4013,6 +4172,108 @@ static void ir_listen_reset_button_event_cb(lv_event_t *event)
     append_event("ir_listen_reset");
 }
 
+static void mini_app_run_action(uint8_t index)
+{
+    if (!g_mini_app_running || index >= g_mini_app_action_count) {
+        strlcpy(g_mini_app_status, "No mini-app action is available.", sizeof(g_mini_app_status));
+        set_activity("Mini App", g_mini_app_status);
+        request_active_app_refresh();
+        return;
+    }
+
+    mini_app_action_t *action = &g_mini_app_actions[index];
+    if (action->has_ir) {
+        esp_err_t err = ir_send_nec_command((uint8_t)(action->command & 0xffU), action->label);
+        snprintf(g_mini_app_status,
+                 sizeof(g_mini_app_status),
+                 "%s IR %.31s.",
+                 err == ESP_OK ? "Ran" : "Failed",
+                 action->label);
+    } else if (strcmp(action->mode, "mic-level-summary") == 0) {
+        g_mesh_voice_recording = true;
+        mesh_capture_voice_draft();
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "Voice draft ready: %.72s", g_mesh_voice_text);
+    } else if (action->has_frame || action->voice || action->text[0] != '\0') {
+        const char *text = action->text;
+        if (action->gps) {
+            g_mesh_gps_share_enabled = true;
+        }
+        if (action->voice && (text == NULL || text[0] == '\0')) {
+            if (!g_mesh_voice_ready) {
+                mesh_capture_voice_draft();
+            }
+            text = g_mesh_voice_text;
+        }
+
+        if (text == NULL || text[0] == '\0') {
+            strlcpy(g_mini_app_status, "Mesh action has no text payload.", sizeof(g_mini_app_status));
+            set_activity("Mini App", g_mini_app_status);
+        } else {
+            mesh_node_t target_node = {
+                .name = "Mini App Target",
+                .short_name = "APP",
+                .node_id = action->to,
+                .hop_limit = 3,
+                .battery_percent = -1,
+                .has_gps = false,
+                .last_seen = "app",
+            };
+            mesh_send_text_to_node(text, action->voice, selected_mesh_channel(), &target_node);
+            snprintf(g_mini_app_status,
+                     sizeof(g_mini_app_status),
+                     "Ran %.31s to %.24s.",
+                     action->label,
+                     action->to);
+        }
+    } else {
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.31s has no native handler.", action->label);
+        set_activity("Mini App", g_mini_app_status);
+    }
+
+    append_event("mini_app_action_run");
+    request_active_app_refresh();
+}
+
+static void mini_app_action_1_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        mini_app_run_action(0);
+    }
+}
+
+static void mini_app_action_2_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        mini_app_run_action(1);
+    }
+}
+
+static void mini_app_action_3_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        mini_app_run_action(2);
+    }
+}
+
+static void mini_app_action_4_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        mini_app_run_action(3);
+    }
+}
+
+static void mini_app_close_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    mini_app_clear();
+    strlcpy(g_mini_app_status, "Mini app closed.", sizeof(g_mini_app_status));
+    set_activity("App Store", g_mini_app_status);
+    append_event("mini_app_closed");
+    request_active_app_refresh();
+}
+
 static void grove_meshtastic_ping_button_event_cb(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
@@ -4617,6 +4878,40 @@ static void render_app_store_locked(lv_obj_t *card, lv_coord_t width)
     app_store_refresh_installed_count();
 
     char line[192];
+    if (g_mini_app_running) {
+        snprintf(line,
+                 sizeof(line),
+                 "%.47s v%.23s | %u actions",
+                 g_mini_app_entry.name[0] != '\0' ? g_mini_app_entry.name : "Mini App",
+                 g_mini_app_entry.version[0] != '\0' ? g_mini_app_entry.version : "-",
+                 (unsigned)g_mini_app_action_count);
+        add_app_status_line(card, "Running", line, width, 0x5ec8ff);
+
+        snprintf(line,
+                 sizeof(line),
+                 "%.111s",
+                 g_mini_app_entry.summary[0] != '\0' ? g_mini_app_entry.summary : "Installed TabForge mini app.");
+        add_app_status_line(card, "Summary", line, width, 0xf1f7f3);
+
+        for (uint8_t i = 0; i < g_mini_app_action_count; ++i) {
+            const mini_app_action_t *action = &g_mini_app_actions[i];
+            char title[12];
+            snprintf(title, sizeof(title), "Action %u", (unsigned)(i + 1U));
+            snprintf(line,
+                     sizeof(line),
+                     "%.35s | %s%s%s",
+                     action->label,
+                     action->has_ir ? "IR" : (strcmp(action->mode, "mic-level-summary") == 0 ? "Mic" : "Mesh"),
+                     action->gps ? " + GPS" : "",
+                     action->voice ? " + voice" : "");
+            add_app_status_line(card, title, line, width, 0xffc857);
+        }
+
+        snprintf(line, sizeof(line), "%.111s", g_mini_app_status);
+        add_app_status_line(card, "Status", line, width, 0x93a6ad);
+        return;
+    }
+
     snprintf(line,
              sizeof(line),
              "%s | catalog %lu | installed %lu",
@@ -4745,13 +5040,30 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
         break;
     case APP_STORE:
-        make_button(actions, button_w, "Fetch", app_store_fetch_button_event_cb);
-        make_button(actions, button_w, "Next App", app_store_next_button_event_cb);
-        make_button(actions, button_w, "Install", app_store_install_button_event_cb);
-        make_button(actions, button_w, "Launch", app_store_launch_button_event_cb);
-        make_button(actions, button_w, "SD Apps", app_store_sd_button_event_cb);
-        make_button(actions, button_w, "Wi-Fi", update_button_event_cb);
-        make_button(actions, button_w, "Update", ota_start_button_event_cb);
+        if (g_mini_app_running) {
+            if (g_mini_app_action_count > 0) {
+                make_button(actions, button_w, g_mini_app_actions[0].label, mini_app_action_1_button_event_cb);
+            }
+            if (g_mini_app_action_count > 1) {
+                make_button(actions, button_w, g_mini_app_actions[1].label, mini_app_action_2_button_event_cb);
+            }
+            if (g_mini_app_action_count > 2) {
+                make_button(actions, button_w, g_mini_app_actions[2].label, mini_app_action_3_button_event_cb);
+            }
+            if (g_mini_app_action_count > 3) {
+                make_button(actions, button_w, g_mini_app_actions[3].label, mini_app_action_4_button_event_cb);
+            }
+            make_button(actions, button_w, "Close App", mini_app_close_button_event_cb);
+            make_button(actions, button_w, "SD Apps", app_store_sd_button_event_cb);
+        } else {
+            make_button(actions, button_w, "Fetch", app_store_fetch_button_event_cb);
+            make_button(actions, button_w, "Next App", app_store_next_button_event_cb);
+            make_button(actions, button_w, "Install", app_store_install_button_event_cb);
+            make_button(actions, button_w, "Launch", app_store_launch_button_event_cb);
+            make_button(actions, button_w, "SD Apps", app_store_sd_button_event_cb);
+            make_button(actions, button_w, "Wi-Fi", update_button_event_cb);
+            make_button(actions, button_w, "Update", ota_start_button_event_cb);
+        }
         break;
     case APP_UPDATE:
         make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
@@ -4791,9 +5103,16 @@ static void render_active_app_page_locked(void)
     lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(card, 8, 0);
 
-    lv_obj_t *title = make_text(card, tile->name, tile->accent, width - 32);
+    const char *app_title = tile->name;
+    const char *app_summary = tile->summary;
+    if (g_active_app == APP_STORE && g_mini_app_running) {
+        app_title = g_mini_app_entry.name[0] != '\0' ? g_mini_app_entry.name : "Mini App";
+        app_summary = g_mini_app_entry.summary[0] != '\0' ? g_mini_app_entry.summary : "Installed TabForge mini app.";
+    }
+
+    lv_obj_t *title = make_text(card, app_title, tile->accent, width - 32);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-    make_text(card, tile->summary, 0xf1f7f3, width - 32);
+    make_text(card, app_summary, 0xf1f7f3, width - 32);
 
     char line_a[128];
     char line_b[128];
