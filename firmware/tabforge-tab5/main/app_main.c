@@ -5233,6 +5233,47 @@ static bool cardputer_run_tab_action_locked(const char *action)
         show_nav_page(NAV_PAGE_SETTINGS);
     } else if (strcmp(action, "wifi") == 0 || strcmp(action, "update") == 0) {
         show_nav_page(NAV_PAGE_UPDATE);
+    } else if (strcmp(action, "messages-open") == 0 || strcmp(action, "mesh-open") == 0) {
+        cardputer_open_tab_app_locked("messages");
+    } else if (strcmp(action, "meshcore-open") == 0) {
+        cardputer_open_tab_app_locked("meshcore");
+    } else if (strcmp(action, "meshcore-help") == 0 || strcmp(action, "core-help") == 0) {
+        g_meshcore_mode = true;
+        refresh_mode_widgets();
+        grove_uart_send_line("help");
+        cardputer_open_tab_app_locked("meshcore");
+        set_activity("MeshCore Help", "Cardputer sent help over Grove.");
+    } else if (strcmp(action, "meshtastic-mode") == 0) {
+        g_meshcore_mode = false;
+        refresh_mode_widgets();
+        (void)meshtastic_send_config_request();
+        set_activity("Meshtastic", "Cardputer selected Meshtastic profile.");
+    } else if (strcmp(action, "tdeck-open") == 0) {
+        cardputer_open_tab_app_locked("tdeck");
+    } else if (strcmp(action, "tdeck-ping") == 0) {
+        cardputer_open_tab_app_locked("tdeck");
+        grove_uart_send_line("{\"tabforge\":\"tdeck-ping\"}");
+        set_activity("T-Deck Ping", g_grove_uart_ready ? "Cardputer sent T-Deck ping." : "Grove UART is not ready.");
+    } else if (strcmp(action, "usb-open") == 0) {
+        cardputer_open_tab_app_locked("usb");
+    } else if (strcmp(action, "usb-probe") == 0) {
+        if (!g_usb_power_ready) {
+            set_accessory_power(true);
+            start_accessory_probe_tasks();
+        }
+        cardputer_open_tab_app_locked("usb");
+        set_activity("USB Bay", "Cardputer requested USB host probe.");
+    } else if (strcmp(action, "recorder-open") == 0 || strcmp(action, "mic-open") == 0) {
+        cardputer_open_tab_app_locked("recorder");
+    } else if (strcmp(action, "mic-voice") == 0 || strcmp(action, "voice-draft") == 0) {
+        g_mesh_voice_recording = true;
+        mesh_capture_voice_draft();
+        cardputer_open_tab_app_locked("recorder");
+    } else if (strcmp(action, "files-open") == 0 || strcmp(action, "sd-open") == 0) {
+        cardputer_open_tab_app_locked("files");
+    } else if (strcmp(action, "files-status") == 0 || strcmp(action, "sd-status") == 0) {
+        cardputer_open_tab_app_locked("files");
+        set_activity("Files", g_sd_ready ? "SD card is mounted." : esp_err_to_name(g_sd_last_error));
     } else if (strcmp(action, "mode") == 0 || strcmp(action, "mesh-mode") == 0) {
         cardputer_toggle_mesh_mode_locked();
     } else if (strcmp(action, "accessories") == 0) {
@@ -5268,6 +5309,14 @@ static bool cardputer_run_tab_action_locked(const char *action)
         xTaskCreate(wifi_connect_task, "tabforge-wifi-connect", 6144, NULL, 5, NULL);
     } else if (strcmp(action, "ota") == 0) {
         xTaskCreate(ota_update_task, "tabforge-ota", 8192, NULL, 5, NULL);
+    } else if (strcmp(action, "ota-open") == 0) {
+        show_nav_page(NAV_PAGE_UPDATE);
+    } else if (strcmp(action, "ota-reboot") == 0) {
+        if (g_ota_reboot_pending) {
+            append_event("ota_reboot_cardputer");
+            esp_restart();
+        }
+        set_activity("OTA", "No completed OTA is waiting for reboot.");
     } else if (strcmp(action, "mesh-channel") == 0) {
         g_mesh_channel_index = (uint8_t)((g_mesh_channel_index + 1U) % TABFORGE_MESH_MAX_CHANNELS);
         set_activity("Mesh Channel", selected_mesh_channel()->name);
@@ -5340,8 +5389,26 @@ static bool cardputer_run_tab_action_locked(const char *action)
         xTaskCreate(app_store_install_task, "tabforge-app-store-install", 8192, NULL, 5, NULL);
     } else if (strcmp(action, "store-launch") == 0) {
         app_store_launch_selected();
+    } else if (strcmp(action, "store-sd") == 0) {
+        app_store_refresh_installed_count();
+        snprintf(g_app_store_last_status,
+                 sizeof(g_app_store_last_status),
+                 "%lu installed app records on SD.",
+                 (unsigned long)g_app_store_installed_count);
+        cardputer_open_tab_app_locked("store");
+        set_activity("SD Apps", g_app_store_last_status);
     } else if (strcmp(action, "cardputer-probe") == 0) {
         cardputer_send_probe();
+    } else if (strcmp(action, "cardputer-open") == 0) {
+        cardputer_open_tab_app_locked("cardputer");
+    } else if (strcmp(action, "cardputer-wifi-text") == 0) {
+        show_nav_page(NAV_PAGE_UPDATE);
+        g_cardputer_focus_textarea = g_ui.wifi_ssid_textarea != NULL ? g_ui.wifi_ssid_textarea : g_ui.wifi_password_textarea;
+        if (g_ui.wifi_keyboard != NULL) {
+            lv_keyboard_set_textarea(g_ui.wifi_keyboard, NULL);
+            lv_obj_add_flag(g_ui.wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+        }
+        set_activity("Cardputer Input", "Wi-Fi text field is ready for the hardware keyboard.");
     } else if (strcmp(action, "cardputer-clear") == 0) {
         g_cardputer_rx_packets = 0;
         g_cardputer_key_count = 0;
@@ -5669,6 +5736,32 @@ static void add_app_status_line(lv_obj_t *parent,
     lv_obj_set_width(label, width);
     lv_obj_set_style_text_color(label, color_hex(accent), 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+}
+
+static void add_unit_status_summary(lv_obj_t *parent, lv_coord_t width)
+{
+    char line[160];
+    const char *c6l = g_grove_rx_packets > 0 ? "rx" : (g_grove_uart_ready ? "ready" : "off");
+    const char *tdeck = g_usb_rx_packets > 0 ? "rx" : usb_state_text();
+    const char *ir = g_ir_probe_ready ? "ready" : "off";
+    snprintf(line,
+             sizeof(line),
+             "C6L %s | T-Deck %s | IR %s | Grove TX %lu RX %lu",
+             c6l,
+             tdeck,
+             ir,
+             (unsigned long)g_grove_tx_packets,
+             (unsigned long)g_grove_rx_packets);
+    add_app_status_line(parent, "Units", line, width, 0x61d5f0);
+
+    snprintf(line,
+             sizeof(line),
+             "Cardputer %s | SDR %s | SD %s | USB host %s",
+             cardputer_keyboard_present() ? g_cardputer_last_source : "touch",
+             sdr_state_text(),
+             g_sd_ready ? (g_sd_recovered ? "recovered" : "ready") : "missing",
+             g_usb_host_ready ? "ready" : "waiting");
+    add_app_status_line(parent, "Devices", line, width, 0x93a6ad);
 }
 
 static void render_mesh_messenger_locked(lv_obj_t *card, lv_coord_t width, bool landscape)
@@ -6077,6 +6170,7 @@ static void render_active_app_page_locked(void)
     lv_obj_t *title = make_text(card, app_title, tile->accent, width - 32);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     make_text(card, app_summary, 0xf1f7f3, width - 32);
+    add_unit_status_summary(card, width - 32);
 
     char line_a[128];
     char line_b[128];
