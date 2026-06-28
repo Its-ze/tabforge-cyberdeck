@@ -158,6 +158,9 @@
 #define TABFORGE_SDR_MAX_USB_DEVICES 4
 #define TABFORGE_SDR_SCAN_INTERVAL_MS 2500
 #define TABFORGE_SDR_STATUS_LEN 112
+#define TABFORGE_CARDPUTER_LINE_LEN 192
+#define TABFORGE_CARDPUTER_TEXT_LEN 64
+#define TABFORGE_CARDPUTER_LAST_LEN 80
 #define MESHTASTIC_STREAM_START1 0x94
 #define MESHTASTIC_STREAM_START2 0xC3
 #define MESHTASTIC_MAX_PROTO_LEN 512
@@ -183,6 +186,7 @@ typedef enum {
     APP_RECORDER,
     APP_USB,
     APP_SDR,
+    APP_CARDPUTER,
     APP_FILES,
     APP_STORE,
     APP_UPDATE,
@@ -384,6 +388,12 @@ typedef struct {
     size_t length;
 } meshtastic_rx_state_t;
 
+typedef struct {
+    char line[TABFORGE_CARDPUTER_LINE_LEN];
+    size_t length;
+    bool active;
+} cardputer_line_state_t;
+
 static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_WIFI, "Wi-Fi", "Scan, connect, and prepare internet OTA.", "Internet", "tile_wifi", APP_WIFI, FEATURE_ACTIVE, 0x70a7ff},
     {LV_SYMBOL_ENVELOPE, "Messages", "Meshtastic C6L channel text and direct sends.", "Grove", "tile_meshtastic", APP_MESSAGES, FEATURE_ACTIVE, 0x43d17a},
@@ -393,6 +403,7 @@ static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_AUDIO, "Recorder", "Live mic level now, push-to-record WAV flow next.", "Live", "tile_mic", APP_RECORDER, FEATURE_ACTIVE, 0xb982ff},
     {LV_SYMBOL_USB, "USB Bay", "Host-side CDC serial workbench for add-ons.", "Host", "tile_usb", APP_USB, FEATURE_ACTIVE, 0x70a7ff},
     {LV_SYMBOL_TUNING, "SDR", "RTL-SDR USB receiver detection and field presets.", "RTL", "tile_sdr", APP_SDR, FEATURE_ACTIVE, 0x69d2e7},
+    {LV_SYMBOL_KEYBOARD, "Cardputer", "Grove or USB-C keyboard controller for TabForge text entry.", "Keys", "tile_cardputer", APP_CARDPUTER, FEATURE_ACTIVE, 0xf0bf4f},
     {LV_SYMBOL_SD_CARD, "Files", "Runtime config, event journal, audio, and backups.", "SD", "tile_sd", APP_FILES, FEATURE_ACTIVE, 0x77dd88},
     {LV_SYMBOL_DOWNLOAD, "Store", "GitHub app catalog with SD-installed mini apps.", "Apps", "tile_store", APP_STORE, FEATURE_ACTIVE, 0x5ec8ff},
     {LV_SYMBOL_DOWNLOAD, "Update", "Internet OTA package checks and confirm button.", "OTA", "tile_update", APP_UPDATE, FEATURE_ACTIVE, 0xffc857},
