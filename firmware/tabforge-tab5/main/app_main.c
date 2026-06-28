@@ -2004,9 +2004,10 @@ static bool cardputer_handle_json_line(const char *source, const char *line)
     copy_json_string(root, "key", key, sizeof(key));
     copy_json_string(root, "text", text, sizeof(text));
 
+    bool has_input = key[0] != '\0' || text[0] != '\0';
     bool is_keyboard = strcmp(tabforge, "keyboard") == 0 ||
                        strcmp(tabforge, "cardputer.keyboard") == 0 ||
-                       strcmp(device, "cardputer") == 0;
+                       (strcmp(device, "cardputer") == 0 && has_input);
     if (is_keyboard) {
         g_cardputer_link_ready = true;
         if (cardputer_source_is_usb(source)) {
@@ -2035,7 +2036,7 @@ static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, s
     }
 
     cardputer_line_state_t *state = cardputer_line_state_for_source(source);
-    bool consumed = false;
+    bool handled = false;
     for (size_t i = 0; i < data_len; ++i) {
         uint8_t byte = data[i];
         if (!state->active) {
@@ -2046,11 +2047,10 @@ static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, s
             state->length = 0;
         }
 
-        consumed = true;
         if (byte == '\n' || byte == '\r') {
             if (state->length > 0U) {
                 state->line[state->length] = '\0';
-                (void)cardputer_handle_json_line(source, state->line);
+                handled |= cardputer_handle_json_line(source, state->line);
             }
             state->length = 0;
             state->active = false;
@@ -2066,7 +2066,7 @@ static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, s
         }
     }
 
-    return consumed;
+    return handled || state->active;
 }
 
 static void apply_cardputer_pending_input_locked(void)
@@ -4579,6 +4579,11 @@ static bool mini_app_run_cardputer_action(mini_app_action_t *action)
         g_cardputer_key_count = 0;
         g_cardputer_insert_count = 0;
         g_cardputer_parse_errors = 0;
+        g_cardputer_pending_text[0] = '\0';
+        g_cardputer_pending_backspaces = 0;
+        g_cardputer_pending_enters = 0;
+        g_cardputer_pending_escape = false;
+        strlcpy(g_cardputer_last_key, "none", sizeof(g_cardputer_last_key));
         strlcpy(g_mini_app_status, "Cardputer stats cleared.", sizeof(g_mini_app_status));
         set_activity("Cardputer", g_mini_app_status);
         append_event("cardputer_stats_cleared");
