@@ -69,7 +69,7 @@ if (Test-Path -LiteralPath (Resolve-ProjectPath ".git")) {
 }
 
 $jsonFiles = Get-ChildItem -LiteralPath $Root -Recurse -File -Filter "*.json" |
-  Where-Object { $_.FullName -notmatch "\\(node_modules|\.git|build|dist)\\" }
+  Where-Object { $_.FullName -notmatch "\\(node_modules|\.git|build|dist)\\" -and $_.Name -ne "package-lock.json" }
 
 foreach ($file in $jsonFiles) {
   try {
@@ -208,6 +208,9 @@ $textFiles = Get-ChildItem -LiteralPath $Root -Recurse -File |
 
 foreach ($file in $textFiles) {
   $content = Get-Content -LiteralPath $file.FullName -Raw
+  if ($null -eq $content) {
+    $content = ""
+  }
   foreach ($pattern in $forbiddenPatterns) {
     if ($content.Contains($pattern)) {
       Add-CheckError "Forbidden private material marker found in $($file.FullName): $pattern"

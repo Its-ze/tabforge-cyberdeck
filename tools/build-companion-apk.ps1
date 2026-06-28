@@ -74,13 +74,13 @@ function Add-AndroidPermission {
     return
   }
 
-  $manifestClose = $text.IndexOf(">")
-  if ($manifestClose -lt 0) {
+  $manifestMatch = [regex]::Match($text, "<manifest\b[^>]*>")
+  if (-not $manifestMatch.Success) {
     throw "Could not patch AndroidManifest.xml; <manifest> tag not found."
   }
 
   $permissionLine = "`r`n    <uses-permission android:name=`"$Permission`" />"
-  $text = $text.Insert($manifestClose + 1, $permissionLine)
+  $text = $text.Insert($manifestMatch.Index + $manifestMatch.Length, $permissionLine)
   Set-Content -LiteralPath $ManifestPath -Encoding UTF8 -Value $text
 }
 

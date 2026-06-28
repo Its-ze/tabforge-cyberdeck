@@ -32,6 +32,7 @@ Included now:
 - Meshtastic/MeshCore mode-switch contract.
 - Full-screen mesh messenger shell with channel selection, saved nodes, GPS-optional sends, canned messages, Grove/USB RX previews, SD message history, and mic-backed voice draft metadata.
 - GitHub Pages app store manifest with SHA256-checked JSON mini-app packages installed to `/tabforge/apps` on the Tab5 SD card.
+- Android companion APK under `companion/tabforge-companion` for phone pairing, exact phone GPS handoff, firmware checks, per-app installs/updates, and diagnostics.
 - GitHub Pages OTA manifests and update-channel metadata.
 - Local cyberdeck console preview under `web/console`.
 - Verification and publish scripts.
@@ -66,6 +67,14 @@ $env:GITHUB_TOKEN = "<token with repo permission>"
 ```
 
 The publish script creates or reuses `Its-ze/tabforge-cyberdeck`, commits the local scaffold, pushes `main`, and enables GitHub Pages with Actions deployments. It does not print the token.
+
+Build the Android companion APK:
+
+```powershell
+.\tools\build-companion-apk.ps1
+```
+
+The script writes `docs\downloads\tabforge-companion-0.1.0-debug.apk` for the GitHub Pages download link.
 
 ## First Flash Plan
 
