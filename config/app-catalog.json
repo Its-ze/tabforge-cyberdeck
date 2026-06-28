@@ -102,11 +102,11 @@
     },
     {
       "id": "cardputer-keyboard",
-      "name": "Cardputer Keyboard",
+      "name": "Cardputer AppDeck",
       "group": "ports",
       "status": "active",
       "surfaces": ["tab5", "github-pages", "cardputer"],
-      "capabilities": ["grove-uart", "usb-cdc", "json-key-events", "text-entry", "remote-probe"]
+      "capabilities": ["grove-uart", "usb-cdc", "json-key-events", "text-entry", "app-deck", "action-paging", "meshtastic-gps-controls", "attachment-controls", "mini-app-actions", "remote-probe"]
     },
     {
       "id": "rs485-console",

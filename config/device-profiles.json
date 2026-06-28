@@ -52,10 +52,10 @@
     {
       "id": "cardputer",
       "name": "M5Stack Cardputer",
-      "role": "keyboard-controller",
+      "role": "keyboard-appdeck-controller",
       "links": ["grove-uart", "usb-cdc"],
-      "features": ["esp32-s3", "keyboard", "display", "usb-cdc", "grove-hy2.0-4p"],
-      "defaultMode": "tabforge-keyboard",
+      "features": ["esp32-s3", "keyboard", "display", "scrollable-appdeck", "usb-cdc", "grove-hy2.0-4p"],
+      "defaultMode": "tabforge-appdeck",
       "publicSafe": true
     }
   ],

@@ -14,20 +14,20 @@
     "apps":  [
                  {
                      "id":  "cardputer-keyboard",
-                     "name":  "Cardputer Controller",
-                     "summary":  "Use an M5Stack Cardputer as a handheld keyboard and app controller for TabForge over Grove UART or USB CDC.",
-                     "version":  "0.2.1",
+                     "name":  "Cardputer AppDeck",
+                     "summary":  "Use an M5Stack Cardputer as a handheld keyboard, scrollable app deck, Meshtastic GPS controller, and attachment remote over Grove UART or USB CDC.",
+                     "version":  "0.3.0",
                      "surface":  "tab5",
                      "category":  "Input",
                      "icon":  "KEY",
                      "status":  "stable",
                      "minFirmware":  "0.1.27",
-                     "releaseNotes":  "Adds Units, Recorder, and Files controller pages, two-column action layout, and wider Tab app command coverage.",
+                     "releaseNotes":  "Renames the companion to AppDeck and adds scrollable app/action pages for Meshtastic GPS, attachments, mini apps, Wi-Fi/OTA, files, IR, recorder, and RTL-SDR.",
                      "actionCount":  4,
                      "packageUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/cardputer-keyboard.json",
                      "installedPath":  "/tabforge/apps/cardputer-keyboard.json",
-                     "sha256":  "ef5596839cbab72a696b6765f1a22dedd5746e23e4b01bede054108a8703b883",
-                     "size":  1241
+                     "sha256":  "b7d4bea8f7815d5db124c831c8975c0ffab86214d31437fa809463213a0dfd96",
+                     "size":  1411
                  },
                  {
                      "id":  "field-comms",

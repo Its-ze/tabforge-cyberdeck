@@ -5337,6 +5337,20 @@ static bool cardputer_run_tab_action_locked(const char *action)
     } else if (strcmp(action, "mesh-gps") == 0) {
         g_mesh_gps_share_enabled = !g_mesh_gps_share_enabled;
         set_activity("Mesh GPS", g_mesh_gps_share_enabled ? "GPS requested." : "GPS disabled.");
+    } else if (strcmp(action, "mesh-save-node") == 0 || strcmp(action, "save-node") == 0) {
+        if (g_mesh_node_index == 0) {
+            set_activity("Saved Nodes", "Broadcast is always available.");
+        } else {
+            uint32_t bit = 1UL << g_mesh_node_index;
+            bool will_save = (g_mesh_saved_node_mask & bit) == 0;
+            if (will_save) {
+                g_mesh_saved_node_mask |= bit;
+            } else {
+                g_mesh_saved_node_mask &= ~bit;
+            }
+            set_activity("Saved Nodes", will_save ? "Node saved." : "Node removed from saved list.");
+            append_event(will_save ? "mesh_node_saved" : "mesh_node_unsaved");
+        }
     } else if (strcmp(action, "mesh-voice") == 0) {
         g_mesh_voice_recording = true;
         mesh_capture_voice_draft();
@@ -5378,6 +5392,9 @@ static bool cardputer_run_tab_action_locked(const char *action)
         size_t count = sizeof(g_sdr_presets) / sizeof(g_sdr_presets[0]);
         g_sdr_preset_index = (uint8_t)((g_sdr_preset_index + 1U) % count);
         set_activity("SDR Preset", selected_sdr_preset()->name);
+    } else if (strcmp(action, "sdr-status") == 0) {
+        append_event("sdr_status_logged");
+        set_activity("SDR Status", g_sdr_status);
     } else if (strcmp(action, "store-open") == 0) {
         cardputer_open_tab_app_locked("store");
     } else if (strcmp(action, "store-fetch") == 0) {
@@ -5397,10 +5414,29 @@ static bool cardputer_run_tab_action_locked(const char *action)
                  (unsigned long)g_app_store_installed_count);
         cardputer_open_tab_app_locked("store");
         set_activity("SD Apps", g_app_store_last_status);
+    } else if (strcmp(action, "mini-action-1") == 0 || strcmp(action, "app-action-1") == 0) {
+        mini_app_run_action(0);
+    } else if (strcmp(action, "mini-action-2") == 0 || strcmp(action, "app-action-2") == 0) {
+        mini_app_run_action(1);
+    } else if (strcmp(action, "mini-action-3") == 0 || strcmp(action, "app-action-3") == 0) {
+        mini_app_run_action(2);
+    } else if (strcmp(action, "mini-action-4") == 0 || strcmp(action, "app-action-4") == 0) {
+        mini_app_run_action(3);
+    } else if (strcmp(action, "mini-close") == 0 || strcmp(action, "app-close") == 0) {
+        mini_app_clear();
+        strlcpy(g_mini_app_status, "Mini app closed.", sizeof(g_mini_app_status));
+        set_activity("App Store", g_mini_app_status);
+        append_event("mini_app_closed");
     } else if (strcmp(action, "cardputer-probe") == 0) {
         cardputer_send_probe();
     } else if (strcmp(action, "cardputer-open") == 0) {
         cardputer_open_tab_app_locked("cardputer");
+    } else if (strcmp(action, "cardputer-power") == 0 || strcmp(action, "power-link") == 0) {
+        set_accessory_power(true);
+        start_accessory_probe_tasks();
+        cardputer_open_tab_app_locked("cardputer");
+        set_activity("Cardputer Link", "Grove UART and USB host are powered.");
+        append_event("cardputer_link_powered");
     } else if (strcmp(action, "cardputer-wifi-text") == 0) {
         show_nav_page(NAV_PAGE_UPDATE);
         g_cardputer_focus_textarea = g_ui.wifi_ssid_textarea != NULL ? g_ui.wifi_ssid_textarea : g_ui.wifi_password_textarea;
