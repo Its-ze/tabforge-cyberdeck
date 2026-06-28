@@ -2020,6 +2020,13 @@ static bool cardputer_handle_json_line(const char *source, const char *line)
         g_cardputer_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
         strlcpy(g_cardputer_last_source, source != NULL ? source : "unknown", sizeof(g_cardputer_last_source));
         strlcpy(g_cardputer_last_key, text[0] != '\0' ? text : (key[0] != '\0' ? key : "key"), sizeof(g_cardputer_last_key));
+        const char *kind = text[0] != '\0' ? "text" : (key[0] != '\0' ? key : "key");
+        ESP_LOGI(TABFORGE_TAG,
+                 "Cardputer keyboard packet via %s type=%.16s text_len=%u packets=%lu",
+                 source != NULL ? source : "unknown",
+                 kind,
+                 (unsigned)strlen(text),
+                 (unsigned long)g_cardputer_rx_packets);
         cardputer_queue_key(key, text);
         append_event("cardputer_key_rx");
         request_active_app_refresh();
