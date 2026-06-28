@@ -6004,11 +6004,16 @@ static void add_app_actions(lv_obj_t *parent,
     lv_coord_t action_h = landscape ? 112 : 236;
     if (app_id == APP_MESSAGES) {
         action_h = landscape ? 212 : 408;
-    } else if (app_id == APP_IR || app_id == APP_SDR || app_id == APP_CARDPUTER || app_id == APP_STORE) {
+    } else if (app_id == APP_MESHCORE || app_id == APP_TDECK || app_id == APP_RECORDER ||
+               app_id == APP_USB || app_id == APP_IR || app_id == APP_SDR ||
+               app_id == APP_CARDPUTER || app_id == APP_FILES || app_id == APP_STORE) {
         action_h = landscape ? 150 : 348;
     }
     lv_obj_set_size(actions, width, action_h);
-    if (app_id == APP_MESSAGES || app_id == APP_IR || app_id == APP_SDR || app_id == APP_CARDPUTER || app_id == APP_STORE) {
+    if (app_id == APP_MESSAGES || app_id == APP_MESHCORE || app_id == APP_TDECK ||
+        app_id == APP_RECORDER || app_id == APP_USB || app_id == APP_IR ||
+        app_id == APP_SDR || app_id == APP_CARDPUTER || app_id == APP_FILES ||
+        app_id == APP_STORE) {
         lv_obj_add_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scrollbar_mode(actions, LV_SCROLLBAR_MODE_AUTO);
     } else {
@@ -6053,12 +6058,16 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
         make_button(actions, button_w, "Send Help", mesh_probe_button_event_cb);
         make_button(actions, button_w, "Core Help", grove_meshcore_help_button_event_cb);
+        make_button(actions, button_w, "Mesh Ping", grove_meshtastic_ping_button_event_cb);
+        make_button(actions, button_w, "T-Deck Ping", grove_tdeck_ping_button_event_cb);
         break;
     case APP_TDECK:
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
         make_button(actions, button_w, "T-Deck Ping", grove_tdeck_ping_button_event_cb);
         make_button(actions, button_w, "Mesh Mode", mode_button_event_cb);
         make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
+        make_button(actions, button_w, "Mesh Ping", grove_meshtastic_ping_button_event_cb);
+        make_button(actions, button_w, "Core Help", grove_meshcore_help_button_event_cb);
         break;
     case APP_IR:
         make_button(actions, button_w, "Power", ir_power_button_event_cb);
@@ -6070,12 +6079,17 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Settings", settings_button_event_cb);
         break;
     case APP_RECORDER:
+        make_button(actions, button_w, "Voice Draft", mesh_voice_button_event_cb);
+        make_button(actions, button_w, "Send Voice", mesh_send_voice_button_event_cb);
         make_button(actions, button_w, "Sleep", sleep_button_event_cb);
         make_button(actions, button_w, "Settings", settings_button_event_cb);
         break;
     case APP_USB:
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
         make_button(actions, button_w, "Mesh Mode", mode_button_event_cb);
+        make_button(actions, button_w, "Scan RTL", sdr_scan_button_event_cb);
+        make_button(actions, button_w, "Cardputer", cardputer_probe_button_event_cb);
+        make_button(actions, button_w, "T-Deck Ping", grove_tdeck_ping_button_event_cb);
         break;
     case APP_SDR:
         make_button(actions, button_w, "Scan RTL", sdr_scan_button_event_cb);
@@ -6090,6 +6104,9 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Clear", cardputer_clear_button_event_cb);
         break;
     case APP_FILES:
+        make_button(actions, button_w, "SD Apps", app_store_sd_button_event_cb);
+        make_button(actions, button_w, "Fetch Store", app_store_fetch_button_event_cb);
+        make_button(actions, button_w, "Run OTA", ota_start_button_event_cb);
         make_button(actions, button_w, "Settings", settings_button_event_cb);
         make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
         break;

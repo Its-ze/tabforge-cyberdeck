@@ -27,7 +27,7 @@ Included now:
 - Android-style Tab5 launcher with a slim status bar, home/quick-status panel, icon app grid, bottom navigation, live SD/USB/mic/add-on stats, and gyro-assisted auto-rotation.
 - Boot-time add-on bring-up for the Tab5 expansion 5V rail, USB-A host power, USB CDC scan/read counters, corrected Grove IR pins, and a passive Grove UART RX counter for C6L-style serial traffic.
 - RTL-SDR app tile and GitHub app package with USB descriptor detection for common RTL2832/RTL2838 receivers.
-- Cardputer controller app tile and GitHub app package with Grove UART/USB CDC JSON key events, app switching, and Mesh/IR/SDR/Store shortcuts.
+- Cardputer controller app tile and GitHub app package with Grove UART/USB CDC JSON key events, app switching, and Mesh/Units/IR/SDR/Store/Recorder/Files shortcuts.
 - Feature catalog for mesh, IR, mic/audio, T-Deck, C6L, USB host, SD, camera, IMU, RS485, and updates.
 - Meshtastic/MeshCore mode-switch contract.
 - Full-screen mesh messenger shell with channel selection, saved nodes, GPS-optional sends, canned messages, Grove/USB RX previews, SD message history, and mic-backed voice draft metadata.
