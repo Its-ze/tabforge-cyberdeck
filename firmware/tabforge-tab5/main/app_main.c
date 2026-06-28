@@ -77,6 +77,12 @@
 #ifndef LV_SYMBOL_REFRESH
 #define LV_SYMBOL_REFRESH "[ROT]"
 #endif
+#ifndef LV_SYMBOL_HOME
+#define LV_SYMBOL_HOME "[HOME]"
+#endif
+#ifndef LV_SYMBOL_POWER
+#define LV_SYMBOL_POWER "[PWR]"
+#endif
 
 #define TABFORGE_TAG "TabForge"
 #define TABFORGE_SD_ROOT BSP_SD_MOUNT_POINT
@@ -5534,38 +5540,60 @@ static void build_top_bar(lv_obj_t *screen, lv_coord_t width, lv_coord_t height,
     lv_obj_t *top = lv_obj_create(screen);
     lv_obj_remove_style_all(top);
     lv_obj_set_size(top, width, height);
-    lv_obj_set_style_bg_color(top, color_hex(0x080c0f), 0);
+    lv_obj_set_style_bg_color(top, color_hex(0x13b9d6), 0);
     lv_obj_set_style_bg_opa(top, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_hor(top, 10, 0);
-    lv_obj_set_style_pad_ver(top, 6, 0);
+    lv_obj_set_style_pad_hor(top, 14, 0);
+    lv_obj_set_style_pad_ver(top, 8, 0);
     lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    g_ui.status_label = make_text(top, "", 0xf1f7f3, (width * 36) / 100);
-    g_ui.rotation_label = make_text(top, "", 0x93a6ad, (width * 36) / 100);
+    g_ui.status_label = make_text(top, "", 0xffffff, (width * 42) / 100);
+    g_ui.rotation_label = make_text(top, "", 0xdffbff, (width * 32) / 100);
     lv_obj_set_style_text_align(g_ui.rotation_label, LV_TEXT_ALIGN_RIGHT, 0);
-    g_ui.battery_label = make_text(top, "BAT --", 0xffc857, (width * 20) / 100);
+    g_ui.battery_label = make_text(top, "BAT --", 0xffffff, (width * 18) / 100);
     lv_obj_set_style_text_align(g_ui.battery_label, LV_TEXT_ALIGN_RIGHT, 0);
 }
 
 static void build_home_header(lv_obj_t *parent, lv_coord_t width, lv_coord_t height)
 {
-    lv_obj_t *header = make_panel(parent, width, height, 0x11191e, 0x263b45);
-    lv_obj_set_style_radius(header, 8, 0);
+    lv_obj_t *header = lv_obj_create(parent);
+    lv_obj_remove_style_all(header);
+    lv_obj_set_size(header, width, height);
+    lv_obj_set_style_bg_color(header, color_hex(0x5d687f), 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(header, 10, 0);
     lv_obj_set_flex_flow(header, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(header, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(header, 5, 0);
+    lv_obj_set_style_pad_row(header, 6, 0);
 
-    g_ui.mode_label = make_text(header, "", 0xf1f7f3, width - 28);
+    g_ui.activity_title_label = make_text(header, "Welcome to TabForge", 0xf4fbff, width - 28);
+    lv_obj_set_style_text_align(g_ui.activity_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    g_ui.activity_detail_label = make_text(header, "Mesh, radio, IR, voice, files, and updates.", 0xd9e4ea, width - 28);
+    lv_obj_set_style_text_align(g_ui.activity_detail_label, LV_TEXT_ALIGN_CENTER, 0);
+    g_ui.mode_label = make_text(header, "", 0x22d3ee, width - 28);
     lv_obj_set_style_text_align(g_ui.mode_label, LV_TEXT_ALIGN_CENTER, 0);
     g_ui.mode_detail_label = make_text(header, "", 0x93a6ad, width - 28);
     lv_obj_set_style_text_align(g_ui.mode_detail_label, LV_TEXT_ALIGN_CENTER, 0);
-    g_ui.activity_title_label = make_text(header, "Home", 0x70a7ff, width - 28);
-    lv_obj_set_style_text_align(g_ui.activity_title_label, LV_TEXT_ALIGN_CENTER, 0);
-    g_ui.activity_detail_label = make_text(header, "Ready", 0xf1f7f3, width - 28);
-    lv_obj_set_style_text_align(g_ui.activity_detail_label, LV_TEXT_ALIGN_CENTER, 0);
-    g_ui.gyro_label = make_text(header, "gyro pending", 0x61d5f0, width - 28);
+    g_ui.gyro_label = make_text(header, "gyro pending", 0xcde8ef, width - 28);
     lv_obj_set_style_text_align(g_ui.gyro_label, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+static lv_obj_t *add_status_pill(lv_obj_t *parent,
+                                 const char *title,
+                                 lv_obj_t **value_label,
+                                 lv_coord_t width,
+                                 lv_coord_t height,
+                                 uint32_t accent)
+{
+    lv_obj_t *pill = make_panel(parent, width, height, 0x202941, accent);
+    lv_obj_set_style_radius(pill, 8, 0);
+    lv_obj_set_style_pad_all(pill, 8, 0);
+    lv_obj_set_flex_flow(pill, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(pill, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    make_text(pill, title, 0x9fb3c0, (width * 42) / 100);
+    *value_label = make_text(pill, "--", 0xf1f7f3, (width * 52) / 100);
+    lv_obj_set_style_text_align(*value_label, LV_TEXT_ALIGN_RIGHT, 0);
+    return pill;
 }
 
 static void build_quick_status(lv_obj_t *parent, lv_coord_t width, lv_coord_t height, bool landscape)
@@ -5573,23 +5601,26 @@ static void build_quick_status(lv_obj_t *parent, lv_coord_t width, lv_coord_t he
     lv_obj_t *stat_grid = lv_obj_create(parent);
     lv_obj_remove_style_all(stat_grid);
     lv_obj_set_size(stat_grid, width, height);
+    lv_obj_set_style_bg_color(stat_grid, color_hex(0x242d46), 0);
+    lv_obj_set_style_bg_opa(stat_grid, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(stat_grid, 8, 0);
     lv_obj_set_flex_flow(stat_grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(stat_grid, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(stat_grid, 8, 0);
+    lv_obj_set_style_pad_row(stat_grid, 6, 0);
     lv_obj_set_style_pad_column(stat_grid, 8, 0);
 
     lv_coord_t columns = landscape && width >= 900 ? 4 : 2;
     lv_coord_t rows = columns == 4 ? 1 : 2;
-    lv_coord_t card_w = (width - ((columns - 1) * 8)) / columns;
-    lv_coord_t card_h = (height - ((rows - 1) * 8)) / rows;
-    if (card_h < 58) {
-        card_h = 58;
+    lv_coord_t card_w = (width - 16 - ((columns - 1) * 8)) / columns;
+    lv_coord_t card_h = (height - 16 - ((rows - 1) * 6)) / rows;
+    if (card_h < 34) {
+        card_h = 34;
     }
 
-    add_stat_card(stat_grid, "Battery", &g_ui.battery_card_label, NULL, card_w, card_h, 0xffc857);
-    add_stat_card(stat_grid, "Wi-Fi", &g_ui.home_wifi_label, NULL, card_w, card_h, 0x70a7ff);
-    add_stat_card(stat_grid, "Add-ons", &g_ui.home_accessory_label, NULL, card_w, card_h, 0x43d17a);
-    add_stat_card(stat_grid, "SD", &g_ui.sd_label, NULL, card_w, card_h, 0xff7a66);
+    add_status_pill(stat_grid, "Battery", &g_ui.battery_card_label, card_w, card_h, 0xffc857);
+    add_status_pill(stat_grid, "Wi-Fi", &g_ui.home_wifi_label, card_w, card_h, 0x70a7ff);
+    add_status_pill(stat_grid, "Add-ons", &g_ui.home_accessory_label, card_w, card_h, 0x43d17a);
+    add_status_pill(stat_grid, "SD", &g_ui.sd_label, card_w, card_h, 0xff7a66);
 }
 
 static void add_home_nav_shortcut(lv_obj_t *parent,
