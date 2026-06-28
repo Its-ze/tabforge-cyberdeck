@@ -64,6 +64,23 @@
                      "size":  1375
                  },
                  {
+                     "id":  "rtl-sdr",
+                     "name":  "RTL-SDR",
+                     "summary":  "USB RTL-SDR receiver app for descriptor detection, field presets, and SDR status logging.",
+                     "version":  "0.1.0",
+                     "surface":  "tab5",
+                     "category":  "Radio",
+                     "icon":  "SDR",
+                     "status":  "stable",
+                     "minFirmware":  "0.1.22",
+                     "releaseNotes":  "Initial RTL-SDR app with USB descriptor detection and native TabForge SDR controls.",
+                     "actionCount":  4,
+                     "packageUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/rtl-sdr.json",
+                     "installedPath":  "/tabforge/apps/rtl-sdr.json",
+                     "sha256":  "4c29803cd76c7b09fda0bb41875fe7c3c828cd1ec504cd4914a6cd9e5dcfe686",
+                     "size":  1094
+                 },
+                 {
                      "id":  "voice-notes",
                      "name":  "Voice Notes",
                      "summary":  "Mic-level voice draft helpers for sending voice-note metadata through mesh text.",

@@ -1,0 +1,49 @@
+{
+  "schema": "tabforge.mini-app.v1",
+  "id": "rtl-sdr",
+  "name": "RTL-SDR",
+  "version": "0.1.0",
+  "surface": "tab5",
+  "summary": "USB RTL-SDR receiver app for descriptor detection, field presets, and SDR status logging.",
+  "store": {
+    "category": "Radio",
+    "icon": "SDR",
+    "status": "stable",
+    "minFirmware": "0.1.22",
+    "releaseNotes": "Initial RTL-SDR app with USB descriptor detection and native TabForge SDR controls."
+  },
+  "storage": {
+    "root": "/tabforge/apps/rtl-sdr",
+    "writes": [
+      "/tabforge/logs/events.jsonl",
+      "/tabforge/apps/rtl-sdr/state.json"
+    ]
+  },
+  "permissions": {
+    "usbHost": true,
+    "sdrReceiver": true,
+    "nativeCode": false
+  },
+  "actions": [
+    {
+      "id": "open-sdr",
+      "label": "Open SDR",
+      "mode": "sdr-open"
+    },
+    {
+      "id": "scan-rtl",
+      "label": "Scan RTL",
+      "mode": "sdr-scan"
+    },
+    {
+      "id": "next-preset",
+      "label": "Next Band",
+      "mode": "sdr-next-preset"
+    },
+    {
+      "id": "log-status",
+      "label": "Log Status",
+      "mode": "sdr-status"
+    }
+  ]
+}

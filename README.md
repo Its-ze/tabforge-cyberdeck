@@ -8,6 +8,7 @@ Target hardware:
 - M5Stack Unit C6L as a detachable LoRa radio running Meshtastic, MeshCore, or an optional TabForge bridge profile.
 - LilyGO T-Deck as an existing Z-Deck/Meshtastic companion that can be queried, launched, and updated without overwriting private settings.
 - M5Stack Unit IR as a Grove IR learner/blaster for short-range control and IR macro capture.
+- RTL-SDR USB receiver on the Tab5 USB-A host port for field radio detection and SDR app workflows.
 
 The project name, folder, and intended public repo are:
 
@@ -24,6 +25,7 @@ Included now:
 - ESP-IDF Tab5 firmware shell with OTA partitions and a feature registry.
 - Android-style Tab5 launcher with a slim status bar, home/quick-status panel, icon app grid, bottom navigation, live SD/USB/mic/add-on stats, and gyro-assisted auto-rotation.
 - Boot-time add-on bring-up for the Tab5 expansion 5V rail, USB-A host power, USB CDC scan/read counters, corrected Grove IR pins, and a passive Grove UART RX counter for C6L-style serial traffic.
+- RTL-SDR app tile and GitHub app package with USB descriptor detection for common RTL2832/RTL2838 receivers.
 - Feature catalog for mesh, IR, mic/audio, T-Deck, C6L, USB host, SD, camera, IMU, RS485, and updates.
 - Meshtastic/MeshCore mode-switch contract.
 - Full-screen mesh messenger shell with channel selection, saved nodes, GPS-optional sends, canned messages, Grove/USB RX previews, SD message history, and mic-backed voice draft metadata.

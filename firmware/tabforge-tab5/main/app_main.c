@@ -30,6 +30,7 @@
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
 #include "usb/cdc_acm_host.h"
+#include "usb/usb_host.h"
 #include "cJSON.h"
 #include "mbedtls/sha256.h"
 
@@ -57,6 +58,9 @@
 #endif
 #ifndef LV_SYMBOL_USB
 #define LV_SYMBOL_USB "[USB]"
+#endif
+#ifndef LV_SYMBOL_TUNING
+#define LV_SYMBOL_TUNING "[SDR]"
 #endif
 #ifndef LV_SYMBOL_SD_CARD
 #define LV_SYMBOL_SD_CARD "[SD]"
@@ -151,6 +155,9 @@
 #define TABFORGE_MINI_APP_LABEL_LEN 36
 #define TABFORGE_MINI_APP_MODE_LEN 32
 #define TABFORGE_MINI_APP_PROTOCOL_LEN 16
+#define TABFORGE_SDR_MAX_USB_DEVICES 4
+#define TABFORGE_SDR_SCAN_INTERVAL_MS 2500
+#define TABFORGE_SDR_STATUS_LEN 112
 #define MESHTASTIC_STREAM_START1 0x94
 #define MESHTASTIC_STREAM_START2 0xC3
 #define MESHTASTIC_MAX_PROTO_LEN 512
@@ -175,6 +182,7 @@ typedef enum {
     APP_IR,
     APP_RECORDER,
     APP_USB,
+    APP_SDR,
     APP_FILES,
     APP_STORE,
     APP_UPDATE,
@@ -207,6 +215,16 @@ typedef enum {
     USB_STATE_DISCONNECTED,
     USB_STATE_ERROR,
 } usb_state_t;
+
+typedef enum {
+    SDR_STATE_OFF,
+    SDR_STATE_WAIT_HOST,
+    SDR_STATE_SCANNING,
+    SDR_STATE_NO_DEVICE,
+    SDR_STATE_USB_OTHER,
+    SDR_STATE_RTL_DETECTED,
+    SDR_STATE_ERROR,
+} sdr_state_t;
 
 typedef enum {
     WIFI_STATE_OFF,
@@ -355,6 +373,13 @@ typedef struct {
 } mini_app_action_t;
 
 typedef struct {
+    const char *name;
+    uint32_t frequency_hz;
+    uint32_t sample_rate_hz;
+    const char *mode;
+} sdr_preset_t;
+
+typedef struct {
     uint8_t buffer[MESHTASTIC_MAX_FRAME_LEN];
     size_t length;
 } meshtastic_rx_state_t;
@@ -367,9 +392,17 @@ static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_EYE_OPEN, "IR Lab", "Learn, label, replay, and store IR macros on SD.", "38 kHz", "tile_ir", APP_IR, FEATURE_ACTIVE, 0xff7a66},
     {LV_SYMBOL_AUDIO, "Recorder", "Live mic level now, push-to-record WAV flow next.", "Live", "tile_mic", APP_RECORDER, FEATURE_ACTIVE, 0xb982ff},
     {LV_SYMBOL_USB, "USB Bay", "Host-side CDC serial workbench for add-ons.", "Host", "tile_usb", APP_USB, FEATURE_ACTIVE, 0x70a7ff},
+    {LV_SYMBOL_TUNING, "SDR", "RTL-SDR USB receiver detection and field presets.", "RTL", "tile_sdr", APP_SDR, FEATURE_ACTIVE, 0x69d2e7},
     {LV_SYMBOL_SD_CARD, "Files", "Runtime config, event journal, audio, and backups.", "SD", "tile_sd", APP_FILES, FEATURE_ACTIVE, 0x77dd88},
     {LV_SYMBOL_DOWNLOAD, "Store", "GitHub app catalog with SD-installed mini apps.", "Apps", "tile_store", APP_STORE, FEATURE_ACTIVE, 0x5ec8ff},
     {LV_SYMBOL_DOWNLOAD, "Update", "Internet OTA package checks and confirm button.", "OTA", "tile_update", APP_UPDATE, FEATURE_ACTIVE, 0xffc857},
+};
+
+static const sdr_preset_t g_sdr_presets[] = {
+    {"NOAA 162.550", 162550000, 1024000, "NFM"},
+    {"FM 98.1", 98100000, 2048000, "WFM"},
+    {"Air 121.500", 121500000, 1024000, "AM"},
+    {"ISM 433.920", 433920000, 1024000, "FSK"},
 };
 
 static const screen_timeout_option_t g_screen_timeouts[] = {
@@ -502,6 +535,23 @@ static uint64_t g_usb_last_rx_ms;
 static uint64_t g_usb_last_tx_ms;
 static cdc_acm_dev_hdl_t g_usb_cdc_handle;
 static bool g_usb_cdc_disconnected;
+static sdr_state_t g_sdr_state = SDR_STATE_OFF;
+static esp_err_t g_sdr_last_error = ESP_OK;
+static bool g_sdr_scan_requested = true;
+static bool g_sdr_client_event_seen;
+static uint32_t g_sdr_scan_count;
+static uint32_t g_sdr_detect_count;
+static uint16_t g_sdr_vid;
+static uint16_t g_sdr_pid;
+static uint8_t g_sdr_addr;
+static uint8_t g_sdr_device_class;
+static uint8_t g_sdr_config_count;
+static uint8_t g_sdr_bulk_in_ep;
+static uint8_t g_sdr_bulk_out_ep;
+static uint16_t g_sdr_bulk_in_mps;
+static uint16_t g_sdr_bulk_out_mps;
+static uint8_t g_sdr_preset_index;
+static char g_sdr_status[TABFORGE_SDR_STATUS_LEN] = "Plug RTL-SDR into USB-A and scan.";
 static i2c_master_dev_handle_t g_battery_monitor;
 static bool g_battery_online;
 static esp_err_t g_battery_last_error = ESP_ERR_NOT_FOUND;
@@ -558,6 +608,7 @@ static bool grove_uart_send_bytes(const uint8_t *data, size_t data_len, const ch
 static bool usb_cdc_send_bytes(const uint8_t *data, size_t data_len, const char *label);
 static void request_active_app_refresh(void);
 static int compare_versions(const char *left, const char *right);
+static void sdr_request_scan(const char *reason);
 static axis3_t g_last_acce;
 static axis3_t g_last_gyro;
 static uint64_t g_last_imu_ms;
@@ -699,6 +750,48 @@ static const char *usb_state_text(void)
     default:
         return "off";
     }
+}
+
+static const char *sdr_state_text(void)
+{
+    switch (g_sdr_state) {
+    case SDR_STATE_WAIT_HOST:
+        return "wait usb";
+    case SDR_STATE_SCANNING:
+        return "scanning";
+    case SDR_STATE_NO_DEVICE:
+        return "no device";
+    case SDR_STATE_USB_OTHER:
+        return "other usb";
+    case SDR_STATE_RTL_DETECTED:
+        return "rtl detected";
+    case SDR_STATE_ERROR:
+        return "error";
+    case SDR_STATE_OFF:
+    default:
+        return "off";
+    }
+}
+
+static const sdr_preset_t *selected_sdr_preset(void)
+{
+    size_t count = sizeof(g_sdr_presets) / sizeof(g_sdr_presets[0]);
+    if (g_sdr_preset_index >= count) {
+        g_sdr_preset_index = 0;
+    }
+    return &g_sdr_presets[g_sdr_preset_index];
+}
+
+static void format_sdr_frequency(uint32_t frequency_hz, char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+    snprintf(buffer,
+             buffer_size,
+             "%lu.%03lu MHz",
+             (unsigned long)(frequency_hz / 1000000UL),
+             (unsigned long)((frequency_hz / 1000UL) % 1000UL));
 }
 
 static const char *wifi_state_text(void)
@@ -4091,6 +4184,100 @@ static void app_store_sd_button_event_cb(lv_event_t *event)
     append_event("app_store_sd_checked");
 }
 
+static void sdr_request_scan(const char *reason)
+{
+    if (!g_usb_power_ready) {
+        set_accessory_power(true);
+        start_accessory_probe_tasks();
+    }
+    g_sdr_scan_requested = true;
+    g_sdr_state = g_usb_host_ready ? SDR_STATE_SCANNING : SDR_STATE_WAIT_HOST;
+    snprintf(g_sdr_status,
+             sizeof(g_sdr_status),
+             "RTL-SDR scan requested%s%s.",
+             reason != NULL && reason[0] != '\0' ? ": " : "",
+             reason != NULL && reason[0] != '\0' ? reason : "");
+    set_activity("SDR Scan", g_sdr_status);
+    append_event("sdr_scan_requested");
+    request_active_app_refresh();
+}
+
+static void sdr_scan_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    sdr_request_scan("USB-A");
+}
+
+static void sdr_next_preset_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    size_t count = sizeof(g_sdr_presets) / sizeof(g_sdr_presets[0]);
+    g_sdr_preset_index = (uint8_t)((g_sdr_preset_index + 1U) % count);
+    const sdr_preset_t *preset = selected_sdr_preset();
+    char frequency[24];
+    format_sdr_frequency(preset->frequency_hz, frequency, sizeof(frequency));
+    snprintf(g_sdr_status,
+             sizeof(g_sdr_status),
+             "Preset %s %s %lu ksps.",
+             preset->name,
+             frequency,
+             (unsigned long)(preset->sample_rate_hz / 1000UL));
+    set_activity("SDR Preset", g_sdr_status);
+    append_event("sdr_preset_next");
+    request_active_app_refresh();
+}
+
+static void sdr_log_status_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    append_event("sdr_status_logged");
+    set_activity("SDR Status", g_sdr_status);
+    request_active_app_refresh();
+}
+
+static bool mini_app_run_sdr_action(mini_app_action_t *action)
+{
+    if (action == NULL) {
+        return false;
+    }
+
+    if (strcmp(action->mode, "sdr-scan") == 0) {
+        sdr_request_scan(action->label);
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "Ran %.31s.", action->label);
+        return true;
+    }
+    if (strcmp(action->mode, "sdr-next-preset") == 0) {
+        size_t count = sizeof(g_sdr_presets) / sizeof(g_sdr_presets[0]);
+        g_sdr_preset_index = (uint8_t)((g_sdr_preset_index + 1U) % count);
+        const sdr_preset_t *preset = selected_sdr_preset();
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "Preset %.31s.", preset->name);
+        set_activity("SDR Preset", g_mini_app_status);
+        append_event("sdr_preset_next");
+        return true;
+    }
+    if (strcmp(action->mode, "sdr-status") == 0) {
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.111s", g_sdr_status);
+        set_activity("SDR Status", g_mini_app_status);
+        append_event("sdr_status_logged");
+        return true;
+    }
+    if (strcmp(action->mode, "sdr-open") == 0) {
+        g_active_app = APP_SDR;
+        show_nav_page(NAV_PAGE_APP);
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "Opened SDR deck.");
+        set_activity("SDR", g_sdr_status);
+        return true;
+    }
+
+    return false;
+}
+
 static rmt_symbol_word_t ir_symbol(uint32_t mark_us, uint32_t space_us)
 {
     rmt_symbol_word_t symbol = {
@@ -4270,7 +4457,12 @@ static void mini_app_run_action(uint8_t index)
     }
 
     mini_app_action_t *action = &g_mini_app_actions[index];
-    if (action->has_ir) {
+    if (strncmp(action->mode, "sdr-", 4) == 0) {
+        if (!mini_app_run_sdr_action(action)) {
+            snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.31s has no SDR handler.", action->label);
+            set_activity("Mini App", g_mini_app_status);
+        }
+    } else if (action->has_ir) {
         esp_err_t err = ir_send_nec_command((uint8_t)(action->command & 0xffU), action->label);
         snprintf(g_mini_app_status,
                  sizeof(g_mini_app_status),
@@ -5060,11 +5252,11 @@ static void add_app_actions(lv_obj_t *parent,
     lv_coord_t action_h = landscape ? 112 : 236;
     if (app_id == APP_MESSAGES) {
         action_h = landscape ? 286 : 408;
-    } else if (app_id == APP_IR || app_id == APP_STORE) {
+    } else if (app_id == APP_IR || app_id == APP_SDR || app_id == APP_STORE) {
         action_h = landscape ? 174 : 348;
     }
     lv_obj_set_size(actions, width, action_h);
-    if (app_id == APP_MESSAGES || app_id == APP_IR || app_id == APP_STORE) {
+    if (app_id == APP_MESSAGES || app_id == APP_IR || app_id == APP_SDR || app_id == APP_STORE) {
         lv_obj_add_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scrollbar_mode(actions, LV_SCROLLBAR_MODE_AUTO);
     } else {
@@ -5132,6 +5324,12 @@ static void add_app_actions(lv_obj_t *parent,
     case APP_USB:
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
         make_button(actions, button_w, "Mesh Mode", mode_button_event_cb);
+        break;
+    case APP_SDR:
+        make_button(actions, button_w, "Scan RTL", sdr_scan_button_event_cb);
+        make_button(actions, button_w, "Next Band", sdr_next_preset_button_event_cb);
+        make_button(actions, button_w, "Log Status", sdr_log_status_button_event_cb);
+        make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
         break;
     case APP_FILES:
         make_button(actions, button_w, "Settings", settings_button_event_cb);
@@ -5300,6 +5498,31 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "CDC", line_b, width - 32, 0xf1f7f3);
         add_app_status_line(card, "Driver", line_c, width - 32, 0x93a6ad);
         break;
+    case APP_SDR: {
+        const sdr_preset_t *preset = selected_sdr_preset();
+        char frequency[24];
+        format_sdr_frequency(preset->frequency_hz, frequency, sizeof(frequency));
+        snprintf(line_a, sizeof(line_a), "USB-A %s | host %s | SDR %s",
+                 g_usb_power_ready ? "on" : "off",
+                 g_usb_host_ready ? "ready" : "waiting",
+                 sdr_state_text());
+        snprintf(line_b, sizeof(line_b), "VID:PID %04x:%04x | addr %u | scans %lu",
+                 (unsigned)g_sdr_vid,
+                 (unsigned)g_sdr_pid,
+                 (unsigned)g_sdr_addr,
+                 (unsigned long)g_sdr_scan_count);
+        snprintf(line_c, sizeof(line_c), "%s %s %lu ksps | IN 0x%02x OUT 0x%02x",
+                 preset->name,
+                 frequency,
+                 (unsigned long)(preset->sample_rate_hz / 1000UL),
+                 (unsigned)g_sdr_bulk_in_ep,
+                 (unsigned)g_sdr_bulk_out_ep);
+        add_app_status_line(card, "Receiver", line_a, width - 32, g_sdr_state == SDR_STATE_RTL_DETECTED ? 0x77dd88 : 0xffc857);
+        add_app_status_line(card, "Device", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Preset", line_c, width - 32, 0x69d2e7);
+        add_app_status_line(card, "Status", g_sdr_status, width - 32, g_sdr_state == SDR_STATE_ERROR ? 0xff7a66 : 0x93a6ad);
+        break;
+    }
     case APP_FILES:
         snprintf(line_a, sizeof(line_a), "SD %s | %s",
                  g_sd_ready ? (g_sd_recovered ? "recovered" : "mounted") : "missing",
@@ -5922,6 +6145,191 @@ static void usb_cdc_event_cb(const cdc_acm_host_dev_event_data_t *event, void *u
     }
 }
 
+static bool sdr_is_rtl_device(uint16_t vid, uint16_t pid)
+{
+    if (vid == 0x0bda) {
+        return pid == 0x2831 || pid == 0x2832 || pid == 0x2838;
+    }
+    if (vid == 0x0ccd) {
+        return pid == 0x00a9 || pid == 0x00b3 || pid == 0x00b4 || pid == 0x00d3;
+    }
+    return false;
+}
+
+static void sdr_parse_config_endpoints(const usb_config_desc_t *config_desc)
+{
+    g_sdr_bulk_in_ep = 0;
+    g_sdr_bulk_out_ep = 0;
+    g_sdr_bulk_in_mps = 0;
+    g_sdr_bulk_out_mps = 0;
+
+    if (config_desc == NULL || config_desc->wTotalLength < 2) {
+        return;
+    }
+
+    const uint8_t *raw = (const uint8_t *)config_desc;
+    uint16_t total_length = config_desc->wTotalLength;
+    uint16_t offset = 0;
+    while ((uint16_t)(offset + 2U) <= total_length) {
+        uint8_t length = raw[offset];
+        uint8_t descriptor_type = raw[offset + 1U];
+        if (length < 2 || (uint16_t)(offset + length) > total_length) {
+            break;
+        }
+
+        if (descriptor_type == 5 && length >= 7) {
+            uint8_t endpoint = raw[offset + 2U];
+            uint8_t attributes = raw[offset + 3U] & 0x03U;
+            uint16_t max_packet = (uint16_t)raw[offset + 4U] | ((uint16_t)raw[offset + 5U] << 8U);
+            if (attributes == 2) {
+                if ((endpoint & 0x80U) != 0 && g_sdr_bulk_in_ep == 0) {
+                    g_sdr_bulk_in_ep = endpoint;
+                    g_sdr_bulk_in_mps = max_packet;
+                } else if ((endpoint & 0x80U) == 0 && g_sdr_bulk_out_ep == 0) {
+                    g_sdr_bulk_out_ep = endpoint;
+                    g_sdr_bulk_out_mps = max_packet;
+                }
+            }
+        }
+
+        offset = (uint16_t)(offset + length);
+    }
+}
+
+static bool sdr_probe_usb_addr(usb_host_client_handle_t client_hdl, uint8_t addr)
+{
+    usb_device_handle_t dev_hdl = NULL;
+    esp_err_t err = usb_host_device_open(client_hdl, addr, &dev_hdl);
+    if (err != ESP_OK) {
+        g_sdr_last_error = err;
+        return false;
+    }
+
+    const usb_device_desc_t *device_desc = NULL;
+    err = usb_host_get_device_descriptor(dev_hdl, &device_desc);
+    if (err != ESP_OK || device_desc == NULL) {
+        g_sdr_last_error = err != ESP_OK ? err : ESP_ERR_INVALID_RESPONSE;
+        usb_host_device_close(client_hdl, dev_hdl);
+        return false;
+    }
+
+    bool is_rtl = sdr_is_rtl_device(device_desc->idVendor, device_desc->idProduct);
+    if (is_rtl) {
+        const usb_config_desc_t *config_desc = NULL;
+        g_sdr_addr = addr;
+        g_sdr_vid = device_desc->idVendor;
+        g_sdr_pid = device_desc->idProduct;
+        g_sdr_device_class = device_desc->bDeviceClass;
+        g_sdr_config_count = device_desc->bNumConfigurations;
+        g_sdr_last_error = usb_host_get_active_config_descriptor(dev_hdl, &config_desc);
+        if (g_sdr_last_error == ESP_OK) {
+            sdr_parse_config_endpoints(config_desc);
+        }
+        g_sdr_detect_count++;
+        g_sdr_state = SDR_STATE_RTL_DETECTED;
+        snprintf(g_sdr_status,
+                 sizeof(g_sdr_status),
+                 "RTL-SDR %04x:%04x addr %u IN 0x%02x/%u OUT 0x%02x/%u",
+                 (unsigned)g_sdr_vid,
+                 (unsigned)g_sdr_pid,
+                 (unsigned)g_sdr_addr,
+                 (unsigned)g_sdr_bulk_in_ep,
+                 (unsigned)g_sdr_bulk_in_mps,
+                 (unsigned)g_sdr_bulk_out_ep,
+                 (unsigned)g_sdr_bulk_out_mps);
+        append_event("sdr_rtl_detected");
+        ESP_LOGI(TABFORGE_TAG, "%s", g_sdr_status);
+    } else if (g_sdr_state != SDR_STATE_RTL_DETECTED) {
+        g_sdr_vid = device_desc->idVendor;
+        g_sdr_pid = device_desc->idProduct;
+        g_sdr_addr = addr;
+        g_sdr_device_class = device_desc->bDeviceClass;
+        g_sdr_config_count = device_desc->bNumConfigurations;
+        g_sdr_state = SDR_STATE_USB_OTHER;
+        snprintf(g_sdr_status,
+                 sizeof(g_sdr_status),
+                 "USB %04x:%04x addr %u is not RTL-SDR.",
+                 (unsigned)g_sdr_vid,
+                 (unsigned)g_sdr_pid,
+                 (unsigned)g_sdr_addr);
+    }
+
+    usb_host_device_close(client_hdl, dev_hdl);
+    return is_rtl;
+}
+
+static void sdr_scan_usb_devices(usb_host_client_handle_t client_hdl)
+{
+    if (!g_usb_host_ready) {
+        g_sdr_state = g_usb_power_ready ? SDR_STATE_WAIT_HOST : SDR_STATE_OFF;
+        strlcpy(g_sdr_status, g_usb_power_ready ? "USB host is starting." : "USB-A power is off.", sizeof(g_sdr_status));
+        return;
+    }
+
+    uint8_t dev_addr_list[TABFORGE_SDR_MAX_USB_DEVICES] = {0};
+    int num_dev = 0;
+    esp_err_t err = usb_host_device_addr_list_fill(TABFORGE_SDR_MAX_USB_DEVICES, dev_addr_list, &num_dev);
+    g_sdr_scan_count++;
+    if (err != ESP_OK) {
+        g_sdr_last_error = err;
+        g_sdr_state = SDR_STATE_ERROR;
+        snprintf(g_sdr_status, sizeof(g_sdr_status), "USB scan failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    if (num_dev <= 0) {
+        g_sdr_vid = 0;
+        g_sdr_pid = 0;
+        g_sdr_addr = 0;
+        g_sdr_bulk_in_ep = 0;
+        g_sdr_bulk_out_ep = 0;
+        g_sdr_state = SDR_STATE_NO_DEVICE;
+        strlcpy(g_sdr_status, "No USB SDR is enumerated.", sizeof(g_sdr_status));
+        return;
+    }
+
+    g_sdr_state = SDR_STATE_SCANNING;
+    bool found = false;
+    for (int i = 0; i < num_dev && i < TABFORGE_SDR_MAX_USB_DEVICES; ++i) {
+        if (dev_addr_list[i] != 0 && sdr_probe_usb_addr(client_hdl, dev_addr_list[i])) {
+            found = true;
+            break;
+        }
+    }
+
+    if (!found && g_sdr_state != SDR_STATE_ERROR) {
+        g_sdr_state = SDR_STATE_USB_OTHER;
+        if (g_sdr_status[0] == '\0') {
+            strlcpy(g_sdr_status, "USB device found, no RTL-SDR VID/PID match.", sizeof(g_sdr_status));
+        }
+    }
+}
+
+static void sdr_usb_client_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg)
+{
+    (void)arg;
+    if (event_msg == NULL) {
+        return;
+    }
+
+    switch (event_msg->event) {
+    case USB_HOST_CLIENT_EVENT_NEW_DEV:
+        g_sdr_client_event_seen = true;
+        g_sdr_scan_requested = true;
+        break;
+    case USB_HOST_CLIENT_EVENT_DEV_GONE:
+        g_sdr_client_event_seen = true;
+        g_sdr_scan_requested = true;
+        if (g_sdr_state == SDR_STATE_RTL_DETECTED) {
+            g_sdr_state = SDR_STATE_NO_DEVICE;
+            strlcpy(g_sdr_status, "RTL-SDR disconnected.", sizeof(g_sdr_status));
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 static void mic_monitor_task(void *arg)
 {
     (void)arg;
@@ -6129,6 +6537,52 @@ static void usb_cdc_task(void *arg)
     }
 }
 
+static void sdr_usb_monitor_task(void *arg)
+{
+    (void)arg;
+
+    while (!g_usb_host_ready) {
+        g_sdr_state = g_usb_power_ready ? SDR_STATE_WAIT_HOST : SDR_STATE_OFF;
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    usb_host_client_handle_t client_hdl = NULL;
+    const usb_host_client_config_t client_config = {
+        .is_synchronous = false,
+        .max_num_event_msg = 5,
+        .async = {
+            .client_event_callback = sdr_usb_client_event_cb,
+            .callback_arg = NULL,
+        },
+    };
+
+    esp_err_t err = usb_host_client_register(&client_config, &client_hdl);
+    if (err != ESP_OK) {
+        g_sdr_last_error = err;
+        g_sdr_state = SDR_STATE_ERROR;
+        snprintf(g_sdr_status, sizeof(g_sdr_status), "SDR USB client failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TABFORGE_TAG, "%s", g_sdr_status);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    append_event("sdr_usb_monitor_started");
+    ESP_LOGI(TABFORGE_TAG, "RTL-SDR descriptor monitor started");
+
+    uint64_t last_scan_ms = 0;
+    while (true) {
+        (void)usb_host_client_handle_events(client_hdl, pdMS_TO_TICKS(100));
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+        if (g_sdr_scan_requested || now_ms - last_scan_ms > TABFORGE_SDR_SCAN_INTERVAL_MS) {
+            g_sdr_scan_requested = false;
+            last_scan_ms = now_ms;
+            sdr_scan_usb_devices(client_hdl);
+            request_active_app_refresh();
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+}
+
 static void accessory_auto_power_task(void *arg)
 {
     (void)arg;
@@ -6245,6 +6699,7 @@ void app_main(void)
     xTaskCreate(mic_monitor_task, "tabforge-mic-monitor", 6144, NULL, 4, NULL);
     xTaskCreate(accessory_auto_power_task, "tabforge-accessory-power", 3072, NULL, 4, NULL);
     xTaskCreate(usb_cdc_task, "tabforge-usb-cdc", 8192, NULL, 6, NULL);
+    xTaskCreate(sdr_usb_monitor_task, "tabforge-sdr-usb", 6144, NULL, 5, NULL);
     xTaskCreate(stats_task, "tabforge-stats", 6144, NULL, 4, NULL);
     xTaskCreate(rotation_task, "tabforge-rotate", 4096, NULL, 4, NULL);
 }
