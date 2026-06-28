@@ -4674,6 +4674,7 @@ static void start_companion_api_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.lru_purge_enable = true;
+    config.max_uri_handlers = 12;
     config.stack_size = 6144;
 
     esp_err_t err = httpd_start(&g_companion_server, &config);
