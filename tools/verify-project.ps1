@@ -27,7 +27,9 @@ $requiredPaths = @(
   "config\app-catalog.json",
   "config\device-profiles.json",
   "config\update-channels.json",
+  "docs\app-store.json",
   "docs\index.html",
+  "docs\apps\index.html",
   "docs\manifest.json",
   "docs\manifest-lab.json",
   "firmware\tabforge-tab5\CMakeLists.txt",
@@ -37,6 +39,7 @@ $requiredPaths = @(
   "protocol\tabforge-link-v0.md",
   "protocol\tabforge-link.schema.json",
   "sd\tabforge\config.example.json",
+  "tools\update-app-catalog.ps1",
   "web\console\index.html",
   "web\console\app.js",
   "web\console\styles.css"
@@ -123,6 +126,53 @@ if (Test-Path -LiteralPath $manifestPath) {
     }
   } else {
     Add-CheckWarning "Stable manifest has no firmware binary yet."
+  }
+}
+
+$appCatalogPath = Resolve-ProjectPath "docs\app-store.json"
+if (Test-Path -LiteralPath $appCatalogPath) {
+  $catalog = Get-Content -LiteralPath $appCatalogPath -Raw | ConvertFrom-Json
+  if ($catalog.project -ne "tabforge-cyberdeck") {
+    Add-CheckError "docs\app-store.json project must be tabforge-cyberdeck."
+  }
+  if ($catalog.schema -notmatch "^tabforge\.app-store\.v[0-9]+$") {
+    Add-CheckError "docs\app-store.json has unsupported schema: $($catalog.schema)"
+  }
+  if (-not $catalog.apps -or @($catalog.apps).Count -lt 1) {
+    Add-CheckError "docs\app-store.json must publish at least one app."
+  }
+
+  foreach ($app in @($catalog.apps)) {
+    if ([string]::IsNullOrWhiteSpace($app.id) -or $app.id -notmatch "^[A-Za-z0-9_-]+$") {
+      Add-CheckError "App catalog entry has invalid id: $($app.id)"
+      continue
+    }
+
+    $packagePath = Resolve-ProjectPath "docs\apps\$($app.id).json"
+    if (-not (Test-Path -LiteralPath $packagePath)) {
+      Add-CheckError "App package missing for catalog entry: $($app.id)"
+      continue
+    }
+
+    $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json
+    if ($package.id -ne $app.id) {
+      Add-CheckError "App package id mismatch for $($app.id)."
+    }
+    if ($package.version -ne $app.version) {
+      Add-CheckError "App package version mismatch for $($app.id)."
+    }
+    if ($package.permissions.nativeCode -ne $false) {
+      Add-CheckError "App package $($app.id) must keep permissions.nativeCode=false."
+    }
+
+    $actualHash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualSize = (Get-Item -LiteralPath $packagePath).Length
+    if ($actualHash -ne $app.sha256) {
+      Add-CheckError "App package hash mismatch for $($app.id)."
+    }
+    if ([int64]$app.size -ne $actualSize) {
+      Add-CheckError "App package size mismatch for $($app.id)."
+    }
   }
 }
 

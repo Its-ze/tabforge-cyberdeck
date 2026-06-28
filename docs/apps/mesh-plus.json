@@ -1,0 +1,59 @@
+{
+  "schema": "tabforge.mini-app.v1",
+  "id": "mesh-plus",
+  "name": "Mesh Plus",
+  "version": "0.1.1",
+  "surface": "tab5",
+  "summary": "Channel-aware mesh messenger actions, GPS-optional status sends, and saved-node friendly defaults.",
+  "store": {
+    "category": "Mesh",
+    "icon": "MSG",
+    "status": "stable",
+    "minFirmware": "0.1.21",
+    "releaseNotes": "Adds a quick status-request action and v1 store metadata."
+  },
+  "storage": {
+    "root": "/tabforge/apps/mesh-plus",
+    "writes": [
+      "/tabforge/mesh/messages.jsonl",
+      "/tabforge/apps/mesh-plus/state.json"
+    ]
+  },
+  "permissions": {
+    "meshText": true,
+    "meshChannels": true,
+    "gpsOptional": true,
+    "micVoiceDrafts": true,
+    "nativeCode": false
+  },
+  "actions": [
+    {
+      "id": "broadcast-status",
+      "label": "Broadcast Status",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "text": "Status green."
+      }
+    },
+    {
+      "id": "ask-status",
+      "label": "Ask Status",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "text": "Please reply with status."
+      }
+    },
+    {
+      "id": "share-location",
+      "label": "Share Location",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "gps": true,
+        "text": "Need assist at my location."
+      }
+    }
+  ]
+}

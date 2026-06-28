@@ -1,9 +1,17 @@
 {
-  "schema": "tabforge.mini-app.v0",
+  "schema": "tabforge.mini-app.v1",
   "id": "voice-notes",
   "name": "Voice Notes",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "surface": "tab5",
+  "summary": "Mic-level voice draft helpers for sending voice-note metadata through mesh text.",
+  "store": {
+    "category": "Audio",
+    "icon": "MIC",
+    "status": "stable",
+    "minFirmware": "0.1.21",
+    "releaseNotes": "Adds v1 store metadata for individual updates."
+  },
   "storage": {
     "root": "/tabforge/apps/voice-notes",
     "writes": [

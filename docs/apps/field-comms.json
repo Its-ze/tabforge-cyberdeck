@@ -1,0 +1,67 @@
+{
+  "schema": "tabforge.mini-app.v1",
+  "id": "field-comms",
+  "name": "Field Comms",
+  "version": "0.1.0",
+  "surface": "tab5",
+  "summary": "Four quick mesh actions for field checks, replies, relay requests, and GPS-optional assist.",
+  "store": {
+    "category": "Mesh",
+    "icon": "FLD",
+    "status": "stable",
+    "minFirmware": "0.1.21",
+    "releaseNotes": "Initial app-library package for rapid field mesh checks."
+  },
+  "storage": {
+    "root": "/tabforge/apps/field-comms",
+    "writes": [
+      "/tabforge/mesh/messages.jsonl",
+      "/tabforge/apps/field-comms/state.json"
+    ]
+  },
+  "permissions": {
+    "meshText": true,
+    "meshChannels": true,
+    "gpsOptional": true,
+    "nativeCode": false
+  },
+  "actions": [
+    {
+      "id": "all-devices-test",
+      "label": "All Devices",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "text": "TabForge field test: all devices reply."
+      }
+    },
+    {
+      "id": "team-status",
+      "label": "Team Status",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "text": "Team status check."
+      }
+    },
+    {
+      "id": "assist-location",
+      "label": "Assist + GPS",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "gps": true,
+        "text": "Need assist at my location."
+      }
+    },
+    {
+      "id": "relay-request",
+      "label": "Relay",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "text": "Relay this message to the team."
+      }
+    }
+  ]
+}

@@ -1,9 +1,17 @@
 {
-  "schema": "tabforge.mini-app.v0",
+  "schema": "tabforge.mini-app.v1",
   "id": "ir-remote-pack",
   "name": "IR Remote Pack",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "surface": "tab5",
+  "summary": "Starter NEC remote macro pack for the Tab5 Grove IR unit controls.",
+  "store": {
+    "category": "IR",
+    "icon": "IR",
+    "status": "stable",
+    "minFirmware": "0.1.21",
+    "releaseNotes": "Adds v1 store metadata for individual updates."
+  },
   "storage": {
     "root": "/tabforge/apps/ir-remote-pack",
     "writes": [
