@@ -2028,7 +2028,7 @@ static void cardputer_queue_command(const char *source,
     g_cardputer_command_count++;
     snprintf(g_cardputer_last_command,
              sizeof(g_cardputer_last_command),
-             "%.24s %.24s%.24s",
+             "%.20s %.20s %.20s",
              command,
              app != NULL && app[0] != '\0' ? app : "",
              action != NULL && action[0] != '\0' ? action : "");
@@ -2887,28 +2887,27 @@ static void add_app_tile(lv_obj_t *parent, const feature_tile_t *tile, lv_coord_
 {
     lv_obj_t *button = lv_button_create(parent);
     lv_obj_set_size(button, width, height);
-    lv_obj_set_style_radius(button, 20, 0);
-    lv_obj_set_style_border_width(button, 0, 0);
-    lv_obj_set_style_bg_color(button, color_hex(0x090d10), 0);
-    lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(button, 4, 0);
+    lv_obj_set_style_radius(button, 8, 0);
+    lv_obj_set_style_border_width(button, 1, 0);
+    lv_obj_set_style_border_color(button, color_hex(0x26343b), 0);
+    lv_obj_set_style_bg_color(button, color_hex(0x11181d), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(button, 8, 0);
     lv_obj_set_flex_flow(button, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(button, 6, 0);
+    lv_obj_set_style_pad_row(button, 4, 0);
     lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(button, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
 
     lv_obj_t *icon_box = lv_obj_create(button);
-    lv_coord_t icon_size = height > 108 ? 68 : 58;
+    lv_coord_t icon_size = height > 116 ? 62 : 54;
     lv_obj_set_size(icon_box, icon_size, icon_size);
-    lv_obj_set_style_radius(icon_box, 18, 0);
+    lv_obj_set_style_radius(icon_box, 8, 0);
     lv_obj_set_style_border_width(icon_box, 0, 0);
     lv_obj_set_style_bg_color(icon_box, color_hex(tile->accent), 0);
     lv_obj_set_style_bg_opa(icon_box, LV_OPA_COVER, 0);
-    lv_obj_set_style_shadow_width(icon_box, 14, 0);
-    lv_obj_set_style_shadow_color(icon_box, color_hex(0x030506), 0);
-    lv_obj_set_style_shadow_opa(icon_box, LV_OPA_30, 0);
+    lv_obj_set_style_shadow_width(icon_box, 0, 0);
     lv_obj_set_style_pad_all(icon_box, 0, 0);
     lv_obj_clear_flag(icon_box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(icon_box, LV_OBJ_FLAG_CLICKABLE);
@@ -2926,6 +2925,11 @@ static void add_app_tile(lv_obj_t *parent, const feature_tile_t *tile, lv_coord_
     lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_add_flag(name, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(name, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
+
+    lv_obj_t *metric = make_text(button, tile->metric, 0x93a6ad, width - 12);
+    lv_obj_set_style_text_align(metric, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_add_flag(metric, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(metric, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
 }
 
 static void update_activity_from_task(const char *title, const char *detail)
@@ -5411,7 +5415,7 @@ static void build_top_bar(lv_obj_t *screen, lv_coord_t width, lv_coord_t height,
 static void build_home_header(lv_obj_t *parent, lv_coord_t width, lv_coord_t height)
 {
     lv_obj_t *header = make_panel(parent, width, height, 0x11191e, 0x263b45);
-    lv_obj_set_style_radius(header, 22, 0);
+    lv_obj_set_style_radius(header, 8, 0);
     lv_obj_set_flex_flow(header, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(header, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(header, 5, 0);
@@ -5438,19 +5442,22 @@ static void build_quick_status(lv_obj_t *parent, lv_coord_t width, lv_coord_t he
     lv_obj_set_style_pad_row(stat_grid, 8, 0);
     lv_obj_set_style_pad_column(stat_grid, 8, 0);
 
-    lv_coord_t columns = landscape ? 6 : 3;
+    lv_coord_t columns = landscape ? 4 : 2;
     lv_coord_t card_w = (width - ((columns - 1) * 8)) / columns;
-    lv_coord_t card_h = landscape ? height : (height - 8) / 2;
+    lv_coord_t rows = landscape ? 2 : 4;
+    lv_coord_t card_h = (height - ((rows - 1) * 8)) / rows;
     if (card_h < 56) {
         card_h = 56;
     }
 
     add_stat_card(stat_grid, "Wi-Fi", &g_ui.wifi_label, NULL, card_w, card_h, 0x70a7ff);
     add_stat_card(stat_grid, "Battery", &g_ui.battery_card_label, NULL, card_w, card_h, 0xffc857);
+    add_stat_card(stat_grid, "Keyboard", &g_ui.cardputer_label, NULL, card_w, card_h, 0xf0bf4f);
+    add_stat_card(stat_grid, "USB", &g_ui.usb_label, NULL, card_w, card_h, 0x69d2e7);
     add_stat_card(stat_grid, "Mic", &g_ui.mic_label, &g_ui.mic_bar, card_w, card_h, 0xb982ff);
     add_stat_card(stat_grid, "SD", &g_ui.sd_label, NULL, card_w, card_h, 0xff7a66);
-    add_stat_card(stat_grid, "Uptime", &g_ui.uptime_label, NULL, card_w, card_h, 0x43d17a);
     add_stat_card(stat_grid, "Screen", &g_ui.screen_label, NULL, card_w, card_h, 0x77dd88);
+    add_stat_card(stat_grid, "Uptime", &g_ui.uptime_label, NULL, card_w, card_h, 0x43d17a);
 }
 
 static void build_app_grid(lv_obj_t *parent, lv_coord_t width, lv_coord_t height, bool landscape)
@@ -5458,22 +5465,22 @@ static void build_app_grid(lv_obj_t *parent, lv_coord_t width, lv_coord_t height
     lv_obj_t *grid = lv_obj_create(parent);
     lv_obj_remove_style_all(grid);
     lv_obj_set_size(grid, width, height);
-    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(grid, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(grid, 14, 0);
-    lv_obj_set_style_pad_column(grid, 14, 0);
+    lv_obj_set_style_pad_row(grid, 12, 0);
+    lv_obj_set_style_pad_column(grid, 12, 0);
 
     size_t tile_count = sizeof(g_tiles) / sizeof(g_tiles[0]);
-    lv_coord_t columns = landscape ? 6 : 4;
-    lv_coord_t rows = (lv_coord_t)((tile_count + (size_t)columns - 1U) / (size_t)columns);
-    lv_coord_t tile_w = (width - ((columns - 1) * 14)) / columns;
-    lv_coord_t tile_h = (height - ((rows - 1) * 14)) / rows;
-    if (tile_h > 118) {
-        tile_h = 118;
-    }
-    if (tile_h < 84) {
-        tile_h = 84;
+    lv_coord_t columns = landscape ? 4 : 3;
+    lv_coord_t tile_w = (width - ((columns - 1) * 12)) / columns;
+    lv_coord_t tile_h = landscape ? 122 : 132;
+    if (!landscape && tile_w < 112) {
+        columns = 2;
+        tile_w = (width - 12) / columns;
+        tile_h = 128;
     }
     for (size_t i = 0; i < tile_count; ++i) {
         add_app_tile(grid, &g_tiles[i], tile_w, tile_h);
@@ -5903,9 +5910,9 @@ static void add_app_actions(lv_obj_t *parent,
     lv_obj_remove_style_all(actions);
     lv_coord_t action_h = landscape ? 112 : 236;
     if (app_id == APP_MESSAGES) {
-        action_h = landscape ? 286 : 408;
+        action_h = landscape ? 212 : 408;
     } else if (app_id == APP_IR || app_id == APP_SDR || app_id == APP_CARDPUTER || app_id == APP_STORE) {
-        action_h = landscape ? 174 : 348;
+        action_h = landscape ? 150 : 348;
     }
     lv_obj_set_size(actions, width, action_h);
     if (app_id == APP_MESSAGES || app_id == APP_IR || app_id == APP_SDR || app_id == APP_CARDPUTER || app_id == APP_STORE) {
@@ -5919,7 +5926,7 @@ static void add_app_actions(lv_obj_t *parent,
     lv_obj_set_style_pad_row(actions, 10, 0);
     lv_obj_set_style_pad_column(actions, 10, 0);
 
-    lv_coord_t columns = landscape ? 3 : 2;
+    lv_coord_t columns = landscape ? 4 : 2;
     lv_coord_t button_w = (width - ((columns - 1) * 10)) / columns;
     if (!landscape && button_w < 120) {
         columns = 1;
@@ -6188,17 +6195,19 @@ static void render_active_app_page_locked(void)
                  g_cardputer_grove_seen ? "seen" : (g_grove_uart_ready ? "ready" : "off"),
                  g_cardputer_usb_seen ? "seen" : usb_state_text(),
                  g_cardputer_focus_textarea != NULL ? "yes" : "no");
-        snprintf(line_b, sizeof(line_b), "keys %lu | inserts %lu | errors %lu",
+        snprintf(line_b, sizeof(line_b), "keys %lu | cmds %lu | inserts %lu | errors %lu",
                  (unsigned long)g_cardputer_key_count,
+                 (unsigned long)g_cardputer_command_count,
                  (unsigned long)g_cardputer_insert_count,
                  (unsigned long)g_cardputer_parse_errors);
-        snprintf(line_c, sizeof(line_c), "last %.54s via %s %llus ago",
+        snprintf(line_c, sizeof(line_c), "key %.25s | cmd %.25s | %s %llus",
                  g_cardputer_last_key,
+                 g_cardputer_last_command,
                  g_cardputer_last_source,
                  (unsigned long long)age_s);
         add_app_status_line(card, "Link", line_a, width - 32, g_cardputer_link_ready ? 0x77dd88 : 0xffc857);
         add_app_status_line(card, "Input", line_b, width - 32, 0xf1f7f3);
-        add_app_status_line(card, "Last Key", line_c, width - 32, 0xf0bf4f);
+        add_app_status_line(card, "Last", line_c, width - 32, 0xf0bf4f);
         add_app_status_line(card, "Wiring", "Grove UART: Tab TX G53/yellow, Tab RX G54/white; Cardputer TX white/GPIO1.", width - 32, 0x93a6ad);
         break;
     }
@@ -6267,8 +6276,8 @@ static void build_body(lv_obj_t *screen, lv_coord_t width, lv_coord_t height, bo
     lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(body, 12, 0);
 
-    lv_coord_t header_h = landscape ? 106 : 148;
-    lv_coord_t quick_h = landscape ? 72 : 118;
+    lv_coord_t header_h = landscape ? 92 : 124;
+    lv_coord_t quick_h = landscape ? 132 : 236;
     lv_coord_t apps_h = height - header_h - quick_h - 24;
     if (apps_h < 220) {
         apps_h = 220;
@@ -6282,8 +6291,8 @@ static void build_body(lv_obj_t *screen, lv_coord_t width, lv_coord_t height, bo
 static void build_dock(lv_obj_t *screen, lv_coord_t width, lv_coord_t height)
 {
     lv_obj_t *dock = make_panel(screen, width, height, 0x11171c, 0x26333b);
-    lv_obj_set_style_radius(dock, 24, 0);
-    lv_obj_set_style_bg_opa(dock, LV_OPA_90, 0);
+    lv_obj_set_style_radius(dock, 8, 0);
+    lv_obj_set_style_bg_opa(dock, LV_OPA_COVER, 0);
     lv_obj_clear_flag(dock, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(dock, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(dock, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);

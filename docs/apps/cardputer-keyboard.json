@@ -1,16 +1,16 @@
 {
   "schema": "tabforge.mini-app.v1",
   "id": "cardputer-keyboard",
-  "name": "Cardputer Keyboard",
-  "version": "0.1.0",
+  "name": "Cardputer Controller",
+  "version": "0.2.0",
   "surface": "tab5",
-  "summary": "Use an M5Stack Cardputer as a handheld keyboard controller for TabForge over Grove UART or USB CDC.",
+  "summary": "Use an M5Stack Cardputer as a handheld keyboard and app controller for TabForge over Grove UART or USB CDC.",
   "store": {
     "category": "Input",
     "icon": "KEY",
     "status": "stable",
-    "minFirmware": "0.1.23",
-    "releaseNotes": "Initial Cardputer keyboard bridge app for TabForge text entry."
+    "minFirmware": "0.1.26",
+    "releaseNotes": "Adds Cardputer app pages for launcher, mesh, IR, system, SDR, and app-store controls while keeping keyboard text entry."
   },
   "storage": {
     "root": "/tabforge/apps/cardputer-keyboard",
@@ -28,7 +28,7 @@
   "actions": [
     {
       "id": "open-keyboard",
-      "label": "Open Keys",
+      "label": "Open Controller",
       "mode": "cardputer-open"
     },
     {
