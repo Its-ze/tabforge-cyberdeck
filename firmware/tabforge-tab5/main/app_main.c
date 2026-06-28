@@ -563,6 +563,23 @@ static uint16_t g_sdr_bulk_in_mps;
 static uint16_t g_sdr_bulk_out_mps;
 static uint8_t g_sdr_preset_index;
 static char g_sdr_status[TABFORGE_SDR_STATUS_LEN] = "Plug RTL-SDR into USB-A and scan.";
+static bool g_cardputer_link_ready;
+static bool g_cardputer_usb_seen;
+static bool g_cardputer_grove_seen;
+static uint32_t g_cardputer_rx_packets;
+static uint32_t g_cardputer_key_count;
+static uint32_t g_cardputer_insert_count;
+static uint32_t g_cardputer_parse_errors;
+static uint64_t g_cardputer_last_rx_ms;
+static char g_cardputer_last_source[16] = "none";
+static char g_cardputer_last_key[TABFORGE_CARDPUTER_LAST_LEN] = "none";
+static char g_cardputer_pending_text[TABFORGE_CARDPUTER_TEXT_LEN];
+static uint8_t g_cardputer_pending_backspaces;
+static uint8_t g_cardputer_pending_enters;
+static bool g_cardputer_pending_escape;
+static lv_obj_t *g_cardputer_focus_textarea;
+static cardputer_line_state_t g_cardputer_usb_line;
+static cardputer_line_state_t g_cardputer_grove_line;
 static i2c_master_dev_handle_t g_battery_monitor;
 static bool g_battery_online;
 static esp_err_t g_battery_last_error = ESP_ERR_NOT_FOUND;
@@ -620,6 +637,8 @@ static bool usb_cdc_send_bytes(const uint8_t *data, size_t data_len, const char 
 static void request_active_app_refresh(void);
 static int compare_versions(const char *left, const char *right);
 static void sdr_request_scan(const char *reason);
+static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, size_t data_len);
+static void apply_cardputer_pending_input_locked(void);
 static axis3_t g_last_acce;
 static axis3_t g_last_gyro;
 static uint64_t g_last_imu_ms;
@@ -1898,6 +1917,9 @@ static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_
     if (!g_meshcore_mode && rx_state != NULL && meshtastic_stream_ingest(rx_state, source, data, data_len)) {
         return;
     }
+    if (cardputer_keyboard_ingest(source, data, data_len)) {
+        return;
+    }
 
     char preview[TABFORGE_MESH_PREVIEW_LEN];
     mesh_copy_preview_from_bytes(data, data_len, preview, sizeof(preview));
@@ -1908,6 +1930,172 @@ static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_
     mesh_record_chat_line("RX", selected_mesh_channel()->name, source != NULL ? source : "mesh", preview);
     append_mesh_message("rx", selected_mesh_channel()->name, source != NULL ? source : "mesh", preview);
     request_active_app_refresh();
+}
+
+static bool cardputer_source_is_usb(const char *source)
+{
+    return source != NULL && strcmp(source, "usb-cdc") == 0;
+}
+
+static cardputer_line_state_t *cardputer_line_state_for_source(const char *source)
+{
+    return cardputer_source_is_usb(source) ? &g_cardputer_usb_line : &g_cardputer_grove_line;
+}
+
+static void cardputer_queue_text(const char *text)
+{
+    if (text == NULL || text[0] == '\0') {
+        return;
+    }
+
+    size_t used = strlen(g_cardputer_pending_text);
+    if (used >= sizeof(g_cardputer_pending_text) - 1U) {
+        return;
+    }
+    strlcpy(&g_cardputer_pending_text[used], text, sizeof(g_cardputer_pending_text) - used);
+}
+
+static void cardputer_queue_key(const char *key, const char *text)
+{
+    if (text != NULL && text[0] != '\0') {
+        cardputer_queue_text(text);
+        return;
+    }
+    if (key == NULL || key[0] == '\0') {
+        return;
+    }
+
+    if (strcmp(key, "backspace") == 0 || strcmp(key, "del") == 0) {
+        if (g_cardputer_pending_backspaces < 16U) {
+            g_cardputer_pending_backspaces++;
+        }
+    } else if (strcmp(key, "enter") == 0) {
+        if (g_cardputer_pending_enters < 8U) {
+            g_cardputer_pending_enters++;
+        }
+    } else if (strcmp(key, "escape") == 0 || strcmp(key, "esc") == 0) {
+        g_cardputer_pending_escape = true;
+    } else if (strlen(key) == 1U) {
+        cardputer_queue_text(key);
+    }
+}
+
+static bool cardputer_handle_json_line(const char *source, const char *line)
+{
+    if (line == NULL || line[0] == '\0') {
+        return false;
+    }
+    if (strstr(line, "\"keyboard\"") == NULL && strstr(line, "\"cardputer\"") == NULL) {
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(line);
+    if (root == NULL) {
+        g_cardputer_parse_errors++;
+        return false;
+    }
+
+    char tabforge[32] = "";
+    char device[32] = "";
+    char key[32] = "";
+    char text[TABFORGE_CARDPUTER_TEXT_LEN] = "";
+    copy_json_string(root, "tabforge", tabforge, sizeof(tabforge));
+    copy_json_string(root, "device", device, sizeof(device));
+    copy_json_string(root, "key", key, sizeof(key));
+    copy_json_string(root, "text", text, sizeof(text));
+
+    bool is_keyboard = strcmp(tabforge, "keyboard") == 0 ||
+                       strcmp(tabforge, "cardputer.keyboard") == 0 ||
+                       strcmp(device, "cardputer") == 0;
+    if (is_keyboard) {
+        g_cardputer_link_ready = true;
+        if (cardputer_source_is_usb(source)) {
+            g_cardputer_usb_seen = true;
+        } else {
+            g_cardputer_grove_seen = true;
+        }
+        g_cardputer_rx_packets++;
+        g_cardputer_key_count++;
+        g_cardputer_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+        strlcpy(g_cardputer_last_source, source != NULL ? source : "unknown", sizeof(g_cardputer_last_source));
+        strlcpy(g_cardputer_last_key, text[0] != '\0' ? text : (key[0] != '\0' ? key : "key"), sizeof(g_cardputer_last_key));
+        cardputer_queue_key(key, text);
+        append_event("cardputer_key_rx");
+        request_active_app_refresh();
+    }
+
+    cJSON_Delete(root);
+    return is_keyboard;
+}
+
+static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, size_t data_len)
+{
+    if (data == NULL || data_len == 0U) {
+        return false;
+    }
+
+    cardputer_line_state_t *state = cardputer_line_state_for_source(source);
+    bool consumed = false;
+    for (size_t i = 0; i < data_len; ++i) {
+        uint8_t byte = data[i];
+        if (!state->active) {
+            if (byte != '{') {
+                continue;
+            }
+            state->active = true;
+            state->length = 0;
+        }
+
+        consumed = true;
+        if (byte == '\n' || byte == '\r') {
+            if (state->length > 0U) {
+                state->line[state->length] = '\0';
+                (void)cardputer_handle_json_line(source, state->line);
+            }
+            state->length = 0;
+            state->active = false;
+            continue;
+        }
+
+        if (state->length < sizeof(state->line) - 1U) {
+            state->line[state->length++] = (char)byte;
+        } else {
+            state->length = 0;
+            state->active = false;
+            g_cardputer_parse_errors++;
+        }
+    }
+
+    return consumed;
+}
+
+static void apply_cardputer_pending_input_locked(void)
+{
+    if (g_cardputer_focus_textarea == NULL) {
+        return;
+    }
+
+    while (g_cardputer_pending_backspaces > 0U) {
+        lv_textarea_del_char(g_cardputer_focus_textarea);
+        g_cardputer_pending_backspaces--;
+        g_cardputer_insert_count++;
+    }
+    while (g_cardputer_pending_enters > 0U) {
+        lv_textarea_add_text(g_cardputer_focus_textarea, "\n");
+        g_cardputer_pending_enters--;
+        g_cardputer_insert_count++;
+    }
+    if (g_cardputer_pending_text[0] != '\0') {
+        lv_textarea_add_text(g_cardputer_focus_textarea, g_cardputer_pending_text);
+        g_cardputer_insert_count += (uint32_t)strlen(g_cardputer_pending_text);
+        g_cardputer_pending_text[0] = '\0';
+    }
+    if (g_cardputer_pending_escape) {
+        if (g_ui.wifi_keyboard != NULL) {
+            lv_obj_add_flag(g_ui.wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+        }
+        g_cardputer_pending_escape = false;
+    }
 }
 
 static esp_err_t mount_sdcard_with_config(bool format_if_mount_failed)
@@ -3804,6 +3992,7 @@ static void wifi_textarea_event_cb(lv_event_t *event)
     lv_obj_t *target = lv_event_get_target(event);
 
     if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+        g_cardputer_focus_textarea = target;
         if (g_ui.wifi_keyboard != NULL) {
             lv_keyboard_set_textarea(g_ui.wifi_keyboard, target);
             lv_obj_clear_flag(g_ui.wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
@@ -4289,6 +4478,115 @@ static bool mini_app_run_sdr_action(mini_app_action_t *action)
     return false;
 }
 
+static void cardputer_send_probe(void)
+{
+    if (!g_ext_power_ready) {
+        set_accessory_power(true);
+        start_accessory_probe_tasks();
+    }
+
+    const char *probe = "{\"tabforge\":\"keyboard.probe\",\"target\":\"cardputer\"}\n";
+    bool sent = false;
+    if (g_grove_uart_ready) {
+        grove_uart_send_line("{\"tabforge\":\"keyboard.probe\",\"target\":\"cardputer\"}");
+        sent = true;
+    }
+    if (g_usb_state == USB_STATE_OPEN) {
+        sent |= usb_cdc_send_bytes((const uint8_t *)probe, strlen(probe), "cardputer probe");
+    }
+
+    set_activity("Cardputer Probe", sent ? "Probe sent to Cardputer." : "Power the Grove/USB link first.");
+    append_event(sent ? "cardputer_probe_sent" : "cardputer_probe_failed");
+    request_active_app_refresh();
+}
+
+static void cardputer_power_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    set_accessory_power(true);
+    start_accessory_probe_tasks();
+    set_activity("Cardputer Link", "Grove UART and USB host are powered.");
+    append_event("cardputer_link_powered");
+    request_active_app_refresh();
+}
+
+static void cardputer_probe_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    cardputer_send_probe();
+}
+
+static void cardputer_wifi_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    show_nav_page(NAV_PAGE_UPDATE);
+    set_activity("Cardputer Text", "Tap an SSID/password field, then type on Cardputer.");
+    append_event("cardputer_wifi_text_entry");
+}
+
+static void cardputer_clear_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    g_cardputer_rx_packets = 0;
+    g_cardputer_key_count = 0;
+    g_cardputer_insert_count = 0;
+    g_cardputer_parse_errors = 0;
+    g_cardputer_pending_text[0] = '\0';
+    g_cardputer_pending_backspaces = 0;
+    g_cardputer_pending_enters = 0;
+    g_cardputer_pending_escape = false;
+    strlcpy(g_cardputer_last_key, "none", sizeof(g_cardputer_last_key));
+    set_activity("Cardputer", "Keyboard stats cleared.");
+    append_event("cardputer_stats_cleared");
+    request_active_app_refresh();
+}
+
+static bool mini_app_run_cardputer_action(mini_app_action_t *action)
+{
+    if (action == NULL) {
+        return false;
+    }
+    if (strcmp(action->mode, "cardputer-open") == 0) {
+        g_active_app = APP_CARDPUTER;
+        show_nav_page(NAV_PAGE_APP);
+        strlcpy(g_mini_app_status, "Opened Cardputer keyboard.", sizeof(g_mini_app_status));
+        set_activity("Cardputer", g_cardputer_last_key);
+        return true;
+    }
+    if (strcmp(action->mode, "cardputer-power") == 0) {
+        set_accessory_power(true);
+        start_accessory_probe_tasks();
+        strlcpy(g_mini_app_status, "Cardputer link powered.", sizeof(g_mini_app_status));
+        set_activity("Cardputer Link", g_mini_app_status);
+        append_event("cardputer_link_powered");
+        return true;
+    }
+    if (strcmp(action->mode, "cardputer-probe") == 0) {
+        cardputer_send_probe();
+        strlcpy(g_mini_app_status, "Probe sent to Cardputer.", sizeof(g_mini_app_status));
+        return true;
+    }
+    if (strcmp(action->mode, "cardputer-clear") == 0) {
+        g_cardputer_rx_packets = 0;
+        g_cardputer_key_count = 0;
+        g_cardputer_insert_count = 0;
+        g_cardputer_parse_errors = 0;
+        strlcpy(g_mini_app_status, "Cardputer stats cleared.", sizeof(g_mini_app_status));
+        set_activity("Cardputer", g_mini_app_status);
+        append_event("cardputer_stats_cleared");
+        return true;
+    }
+    return false;
+}
+
 static rmt_symbol_word_t ir_symbol(uint32_t mark_us, uint32_t space_us)
 {
     rmt_symbol_word_t symbol = {
@@ -4468,7 +4766,12 @@ static void mini_app_run_action(uint8_t index)
     }
 
     mini_app_action_t *action = &g_mini_app_actions[index];
-    if (strncmp(action->mode, "sdr-", 4) == 0) {
+    if (strncmp(action->mode, "cardputer-", 10) == 0) {
+        if (!mini_app_run_cardputer_action(action)) {
+            snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.31s has no Cardputer handler.", action->label);
+            set_activity("Mini App", g_mini_app_status);
+        }
+    } else if (strncmp(action->mode, "sdr-", 4) == 0) {
         if (!mini_app_run_sdr_action(action)) {
             snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.31s has no SDR handler.", action->label);
             set_activity("Mini App", g_mini_app_status);
@@ -5263,11 +5566,11 @@ static void add_app_actions(lv_obj_t *parent,
     lv_coord_t action_h = landscape ? 112 : 236;
     if (app_id == APP_MESSAGES) {
         action_h = landscape ? 286 : 408;
-    } else if (app_id == APP_IR || app_id == APP_SDR || app_id == APP_STORE) {
+    } else if (app_id == APP_IR || app_id == APP_SDR || app_id == APP_CARDPUTER || app_id == APP_STORE) {
         action_h = landscape ? 174 : 348;
     }
     lv_obj_set_size(actions, width, action_h);
-    if (app_id == APP_MESSAGES || app_id == APP_IR || app_id == APP_SDR || app_id == APP_STORE) {
+    if (app_id == APP_MESSAGES || app_id == APP_IR || app_id == APP_SDR || app_id == APP_CARDPUTER || app_id == APP_STORE) {
         lv_obj_add_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scrollbar_mode(actions, LV_SCROLLBAR_MODE_AUTO);
     } else {
@@ -5341,6 +5644,12 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Next Band", sdr_next_preset_button_event_cb);
         make_button(actions, button_w, "Log Status", sdr_log_status_button_event_cb);
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
+        break;
+    case APP_CARDPUTER:
+        make_button(actions, button_w, "Power Link", cardputer_power_button_event_cb);
+        make_button(actions, button_w, "Probe", cardputer_probe_button_event_cb);
+        make_button(actions, button_w, "Wi-Fi Text", cardputer_wifi_button_event_cb);
+        make_button(actions, button_w, "Clear", cardputer_clear_button_event_cb);
         break;
     case APP_FILES:
         make_button(actions, button_w, "Settings", settings_button_event_cb);
@@ -5532,6 +5841,27 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Device", line_b, width - 32, 0xf1f7f3);
         add_app_status_line(card, "Preset", line_c, width - 32, 0x69d2e7);
         add_app_status_line(card, "Status", g_sdr_status, width - 32, g_sdr_state == SDR_STATE_ERROR ? 0xff7a66 : 0x93a6ad);
+        break;
+    }
+    case APP_CARDPUTER: {
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+        uint64_t age_s = g_cardputer_last_rx_ms > 0 ? (now_ms - g_cardputer_last_rx_ms) / 1000ULL : 0;
+        snprintf(line_a, sizeof(line_a), "Grove %s | USB %s | focused %s",
+                 g_cardputer_grove_seen ? "seen" : (g_grove_uart_ready ? "ready" : "off"),
+                 g_cardputer_usb_seen ? "seen" : usb_state_text(),
+                 g_cardputer_focus_textarea != NULL ? "yes" : "no");
+        snprintf(line_b, sizeof(line_b), "keys %lu | inserts %lu | errors %lu",
+                 (unsigned long)g_cardputer_key_count,
+                 (unsigned long)g_cardputer_insert_count,
+                 (unsigned long)g_cardputer_parse_errors);
+        snprintf(line_c, sizeof(line_c), "last %.54s via %s %llus ago",
+                 g_cardputer_last_key,
+                 g_cardputer_last_source,
+                 (unsigned long long)age_s);
+        add_app_status_line(card, "Link", line_a, width - 32, g_cardputer_link_ready ? 0x77dd88 : 0xffc857);
+        add_app_status_line(card, "Input", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Last Key", line_c, width - 32, 0xf0bf4f);
+        add_app_status_line(card, "Wiring", "Grove UART: Tab TX G53/yellow, Tab RX G54/white; Cardputer TX on white GPIO2.", width - 32, 0x93a6ad);
         break;
     }
     case APP_FILES:
@@ -6615,6 +6945,7 @@ static void stats_task(void *arg)
     while (true) {
         if (bsp_display_lock(1000)) {
             check_screen_power_locked();
+            apply_cardputer_pending_input_locked();
             refresh_live_stats_locked();
             if (g_active_app_refresh_requested && g_nav_page == NAV_PAGE_APP && g_ui.page_app != NULL) {
                 g_active_app_refresh_requested = false;

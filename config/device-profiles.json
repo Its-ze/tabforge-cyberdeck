@@ -48,6 +48,15 @@
       "features": ["rtl2832", "bulk-iq", "r820t-compatible", "field-presets"],
       "defaultMode": "sdr",
       "publicSafe": true
+    },
+    {
+      "id": "cardputer",
+      "name": "M5Stack Cardputer",
+      "role": "keyboard-controller",
+      "links": ["grove-uart", "usb-cdc"],
+      "features": ["esp32-s3", "keyboard", "display", "usb-cdc", "grove-hy2.0-4p"],
+      "defaultMode": "tabforge-keyboard",
+      "publicSafe": true
     }
   ],
   "transports": [
@@ -55,15 +64,15 @@
       "id": "usb-cdc",
       "name": "USB CDC Serial",
       "priority": 1,
-      "useFor": ["unit-c6l", "tdeck"],
+      "useFor": ["unit-c6l", "tdeck", "cardputer"],
       "notes": "Preferred for first Meshtastic/MeshCore integration because it avoids wireless mode conflicts."
     },
     {
       "id": "grove-uart",
       "name": "Grove UART",
       "priority": 2,
-      "useFor": ["unit-c6l"],
-      "notes": "Use only with a known bridge firmware profile or documented serial pinout."
+      "useFor": ["unit-c6l", "cardputer"],
+      "notes": "Use only with a known bridge firmware profile or documented serial pinout. For Cardputer keyboard, use Cardputer GPIO2 as TX to Tab5 white/RX and GPIO1 as RX from Tab5 yellow/TX."
     },
     {
       "id": "ble",
