@@ -39,6 +39,15 @@
       "features": ["940nm-emitter", "38khz-receiver", "nec-decode", "nec-send"],
       "defaultMode": "ir-lab",
       "publicSafe": true
+    },
+    {
+      "id": "rtl-sdr",
+      "name": "RTL-SDR USB Receiver",
+      "role": "sdr-receiver",
+      "links": ["usb-host-vendor"],
+      "features": ["rtl2832", "bulk-iq", "r820t-compatible", "field-presets"],
+      "defaultMode": "sdr",
+      "publicSafe": true
     }
   ],
   "transports": [
@@ -69,6 +78,13 @@
       "priority": 4,
       "useFor": ["tab5", "unit-c6l", "tdeck"],
       "notes": "Use only after manifest hash verification and on-screen confirmation."
+    },
+    {
+      "id": "usb-host-vendor",
+      "name": "USB Host Vendor/Bulk",
+      "priority": 5,
+      "useFor": ["rtl-sdr"],
+      "notes": "Used for RTL-SDR descriptor detection now; vendor control and bulk IQ streaming are the next driver layer."
     }
   ]
 }

@@ -93,6 +93,14 @@
       "capabilities": ["keyboard", "mouse", "cdc-serial", "mass-storage", "device-picker"]
     },
     {
+      "id": "rtl-sdr",
+      "name": "RTL-SDR",
+      "group": "ports",
+      "status": "active",
+      "surfaces": ["tab5", "github-pages"],
+      "capabilities": ["usb-descriptor-scan", "rtl2832-detect", "field-presets", "event-log", "mini-app-actions"]
+    },
+    {
       "id": "rs485-console",
       "name": "RS485 Console",
       "group": "ports",
