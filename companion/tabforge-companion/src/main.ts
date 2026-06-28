@@ -108,7 +108,7 @@ function logLine(message: string): void {
 }
 
 async function tabGet(path: string): Promise<JsonMap> {
-  const response = await fetch(`${state.tabUrl}${path}`, {
+  const response = await fetchWithTimeout(`${state.tabUrl}${path}`, {
     method: 'GET',
     cache: 'no-store',
   });
@@ -120,7 +120,7 @@ async function tabPost(path: string, body: JsonMap = {}): Promise<JsonMap> {
   if (state.token) {
     payload.token = state.token;
   }
-  const response = await fetch(`${state.tabUrl}${path}`, {
+  const response = await fetchWithTimeout(`${state.tabUrl}${path}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'text/plain;charset=utf-8',
@@ -128,6 +128,19 @@ async function tabPost(path: string, body: JsonMap = {}): Promise<JsonMap> {
     body: JSON.stringify(payload),
   });
   return parseResponse(response);
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 7000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 async function parseResponse(response: Response): Promise<JsonMap> {
@@ -589,4 +602,8 @@ function escapeHtml(value: string): string {
 renderShell();
 bindEvents();
 configureAutoShare();
-void refreshStatus();
+if (state.token) {
+  void refreshStatus();
+} else {
+  logLine('Enter the Tab IP, then pair this phone.');
+}

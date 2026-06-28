@@ -1,1 +1,1 @@
-﻿1feadec2342275cfc99ffb82a7bee878ecf8814f8aa5c85a34b901f3f7154670  tabforge-companion-0.1.0-debug.apk
+﻿68480fc4cd39a2bddb640862b04e50919b7905e6160ae9a2b436ba0db5f0ad02  tabforge-companion-0.1.0-debug.apk
