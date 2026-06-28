@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(PROJECT_VER "0.1.24")
+set(PROJECT_VER "0.1.25")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(tabforge-tab5)

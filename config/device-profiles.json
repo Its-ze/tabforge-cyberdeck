@@ -72,7 +72,7 @@
       "name": "Grove UART",
       "priority": 2,
       "useFor": ["unit-c6l", "cardputer"],
-      "notes": "Use only with a known bridge firmware profile or documented serial pinout. For Cardputer keyboard, use Cardputer GPIO2 as TX to Tab5 white/RX and GPIO1 as RX from Tab5 yellow/TX."
+      "notes": "Use only with a known bridge firmware profile or documented serial pinout. For Cardputer keyboard, use Cardputer GPIO1/white as TX to Tab5 white/RX and GPIO2/yellow as RX from Tab5 yellow/TX."
     },
     {
       "id": "ble",

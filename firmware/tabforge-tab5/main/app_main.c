@@ -5873,7 +5873,7 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Link", line_a, width - 32, g_cardputer_link_ready ? 0x77dd88 : 0xffc857);
         add_app_status_line(card, "Input", line_b, width - 32, 0xf1f7f3);
         add_app_status_line(card, "Last Key", line_c, width - 32, 0xf0bf4f);
-        add_app_status_line(card, "Wiring", "Grove UART: Tab TX G53/yellow, Tab RX G54/white; Cardputer TX on white GPIO2.", width - 32, 0x93a6ad);
+        add_app_status_line(card, "Wiring", "Grove UART: Tab TX G53/yellow, Tab RX G54/white; Cardputer TX white/GPIO1.", width - 32, 0x93a6ad);
         break;
     }
     case APP_FILES:
