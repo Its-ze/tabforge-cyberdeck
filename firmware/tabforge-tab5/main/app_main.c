@@ -2076,7 +2076,7 @@ static void apply_cardputer_pending_input_locked(void)
     }
 
     while (g_cardputer_pending_backspaces > 0U) {
-        lv_textarea_del_char(g_cardputer_focus_textarea);
+        lv_textarea_delete_char(g_cardputer_focus_textarea);
         g_cardputer_pending_backspaces--;
         g_cardputer_insert_count++;
     }
