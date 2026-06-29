@@ -2108,7 +2108,11 @@ static bool meshtastic_parse_from_radio(const char *source, const uint8_t *paylo
             char text[TABFORGE_MESH_PREVIEW_LEN];
             if (meshtastic_parse_mesh_packet(&payload[offset], (size_t)len, &from_node, &channel, &portnum, text, sizeof(text))) {
                 g_meshtastic_api_rx_frames++;
+                bool first_mesh_module = !g_mesh_module_ready;
                 g_mesh_module_ready = true;
+                if (first_mesh_module) {
+                    announce_module_attached("Meshtastic attached", source != NULL ? source : "serial", "meshtastic_api_detected");
+                }
                 snprintf(g_mesh_last_transport, sizeof(g_mesh_last_transport), "%s api", mesh_transport_source_label(source));
                 if (portnum == MESHTASTIC_TEXT_MESSAGE_APP && text[0] != '\0') {
                     char node_label[24];
@@ -2125,7 +2129,11 @@ static bool meshtastic_parse_from_radio(const char *source, const uint8_t *paylo
             offset += (size_t)len;
         } else if (field == 3U || field == 4U || field == 10U || field == 13U) {
             g_meshtastic_api_rx_frames++;
+            bool first_mesh_module = !g_mesh_module_ready;
             g_mesh_module_ready = true;
+            if (first_mesh_module) {
+                announce_module_attached("Meshtastic attached", source != NULL ? source : "serial", "meshtastic_api_detected");
+            }
             strlcpy(g_mesh_last_received, "Meshtastic status/config frame", sizeof(g_mesh_last_received));
             snprintf(g_mesh_last_transport, sizeof(g_mesh_last_transport), "%s api", mesh_transport_source_label(source));
             if (!proto_skip_value(payload, payload_len, &offset, wire)) {
@@ -2194,6 +2202,318 @@ static bool meshtastic_stream_ingest(meshtastic_rx_state_t *state,
     return parsed;
 }
 
+static bool nmea_copy_field(const char *line, uint8_t index, char *buffer, size_t buffer_size)
+{
+    if (line == NULL || buffer == NULL || buffer_size == 0U) {
+        return false;
+    }
+
+    uint8_t field = 0;
+    const char *cursor = line;
+    while (*cursor != '\0' && field < index) {
+        if (*cursor == ',') {
+            field++;
+        }
+        cursor++;
+    }
+    if (field != index) {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    size_t out = 0;
+    while (*cursor != '\0' && *cursor != ',' && *cursor != '*' && out < buffer_size - 1U) {
+        buffer[out++] = *cursor++;
+    }
+    buffer[out] = '\0';
+    return out > 0;
+}
+
+static bool nmea_parse_coordinate(const char *coord, const char *hemisphere, double *value)
+{
+    if (coord == NULL || coord[0] == '\0' || hemisphere == NULL || hemisphere[0] == '\0' || value == NULL) {
+        return false;
+    }
+
+    double raw = atof(coord);
+    if (raw <= 0.0) {
+        return false;
+    }
+
+    int degrees = (int)(raw / 100.0);
+    double minutes = raw - ((double)degrees * 100.0);
+    double decimal = (double)degrees + (minutes / 60.0);
+    if (hemisphere[0] == 'S' || hemisphere[0] == 'W') {
+        decimal = -decimal;
+    }
+    *value = decimal;
+    return true;
+}
+
+static gps_line_state_t *gps_line_state_for_source(const char *source)
+{
+    if (source != NULL && strcmp(source, "grove-uart") == 0) {
+        return &g_grove_gps_line;
+    }
+    return &g_usb_gps_line;
+}
+
+static const char *gps_transport_label(const char *source)
+{
+    return source != NULL && strcmp(source, "grove-uart") == 0 ? "Grove GPS" : "USB GPS";
+}
+
+static bool gps_handle_nmea_line(const char *source, const char *line)
+{
+    if (line == NULL || line[0] != '$' || strlen(line) < 6U) {
+        return false;
+    }
+
+    bool is_rmc = strncmp(&line[3], "RMC", 3) == 0;
+    bool is_gga = strncmp(&line[3], "GGA", 3) == 0;
+    if (!is_rmc && !is_gga) {
+        return false;
+    }
+
+    bool first_sentence = !g_usb_gps_seen;
+    g_usb_gps_seen = true;
+    g_usb_gps_sentence_count++;
+    g_usb_gps_last_ms = now_ms_u32();
+    strlcpy(g_usb_gps_source, gps_transport_label(source), sizeof(g_usb_gps_source));
+    if (first_sentence) {
+        announce_module_attached(gps_transport_label(source), "NMEA stream detected; waiting for a valid fix.", "gps_nmea_detected");
+    }
+
+    char time_field[16] = "";
+    char status[4] = "";
+    char lat_field[20] = "";
+    char ns[4] = "";
+    char lon_field[20] = "";
+    char ew[4] = "";
+    char fix_field[8] = "";
+    char hdop_field[12] = "";
+    char alt_field[16] = "";
+    double lat = 0.0;
+    double lon = 0.0;
+    bool valid = false;
+
+    if (is_rmc) {
+        (void)nmea_copy_field(line, 1, time_field, sizeof(time_field));
+        (void)nmea_copy_field(line, 2, status, sizeof(status));
+        (void)nmea_copy_field(line, 3, lat_field, sizeof(lat_field));
+        (void)nmea_copy_field(line, 4, ns, sizeof(ns));
+        (void)nmea_copy_field(line, 5, lon_field, sizeof(lon_field));
+        (void)nmea_copy_field(line, 6, ew, sizeof(ew));
+        valid = status[0] == 'A' &&
+                nmea_parse_coordinate(lat_field, ns, &lat) &&
+                nmea_parse_coordinate(lon_field, ew, &lon);
+    } else {
+        (void)nmea_copy_field(line, 1, time_field, sizeof(time_field));
+        (void)nmea_copy_field(line, 2, lat_field, sizeof(lat_field));
+        (void)nmea_copy_field(line, 3, ns, sizeof(ns));
+        (void)nmea_copy_field(line, 4, lon_field, sizeof(lon_field));
+        (void)nmea_copy_field(line, 5, ew, sizeof(ew));
+        (void)nmea_copy_field(line, 6, fix_field, sizeof(fix_field));
+        (void)nmea_copy_field(line, 8, hdop_field, sizeof(hdop_field));
+        (void)nmea_copy_field(line, 9, alt_field, sizeof(alt_field));
+        valid = atoi(fix_field) > 0 &&
+                nmea_parse_coordinate(lat_field, ns, &lat) &&
+                nmea_parse_coordinate(lon_field, ew, &lon);
+    }
+
+    if (time_field[0] != '\0') {
+        strlcpy(g_usb_gps_time, time_field, sizeof(g_usb_gps_time));
+    }
+
+    if (!valid) {
+        g_usb_gps_parse_errors++;
+        return true;
+    }
+
+    bool first_fix = !g_usb_gps_fix_ready;
+    g_usb_gps_fix_ready = true;
+    g_usb_gps_fix_count++;
+    g_usb_gps_latitude = lat;
+    g_usb_gps_longitude = lon;
+    if (alt_field[0] != '\0') {
+        g_usb_gps_altitude_m = atof(alt_field);
+    }
+    if (hdop_field[0] != '\0') {
+        g_usb_gps_accuracy_m = atof(hdop_field) * 5.0;
+    } else if (g_usb_gps_accuracy_m <= 0.0) {
+        g_usb_gps_accuracy_m = 5.0;
+    }
+    if (first_fix) {
+        announce_module_attached("GPS fix acquired", gps_transport_label(source), "gps_fix_acquired");
+    }
+    request_active_app_refresh();
+    return true;
+}
+
+static bool gps_stream_ingest(const char *source, const uint8_t *data, size_t data_len)
+{
+    if (data == NULL || data_len == 0U) {
+        return false;
+    }
+
+    gps_line_state_t *state = gps_line_state_for_source(source);
+    bool handled = false;
+    bool tracking = false;
+    for (size_t i = 0; i < data_len; ++i) {
+        char byte = (char)data[i];
+        if (!state->active) {
+            if (byte != '$') {
+                continue;
+            }
+            state->active = true;
+            state->length = 0;
+        }
+
+        tracking = true;
+        if (byte == '\r' || byte == '\n') {
+            if (state->length > 0U) {
+                state->line[state->length] = '\0';
+                handled |= gps_handle_nmea_line(source, state->line);
+            }
+            state->length = 0;
+            state->active = false;
+            continue;
+        }
+
+        if (state->length < sizeof(state->line) - 1U) {
+            state->line[state->length++] = byte;
+        } else {
+            state->length = 0;
+            state->active = false;
+            g_usb_gps_parse_errors++;
+        }
+    }
+
+    return handled || tracking;
+}
+
+static bool roadscout_handle_json_line(const char *source, const char *line)
+{
+    if (line == NULL || line[0] == '\0') {
+        return false;
+    }
+    if (strstr(line, "RoadLensESP32") == NULL &&
+        strstr(line, "\"type\":\"detection\"") == NULL &&
+        strstr(line, "\"signature_count\"") == NULL &&
+        strstr(line, "\"sniffer_active\"") == NULL) {
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(line);
+    if (root == NULL) {
+        return false;
+    }
+
+    bool first_seen = !g_roadscout_sensor_seen;
+    g_roadscout_sensor_seen = true;
+    if (first_seen) {
+        announce_module_attached("RoadLens sensor attached", source != NULL ? source : "serial", "roadscout_sensor_detected");
+    }
+
+    char type[24] = "";
+    char device[32] = "";
+    char ssid[48] = "";
+    char mac[24] = "";
+    char label[48] = "";
+    copy_json_string(root, "type", type, sizeof(type));
+    copy_json_string(root, "device", device, sizeof(device));
+    copy_json_string(root, "ssid", ssid, sizeof(ssid));
+    copy_json_string(root, "mac", mac, sizeof(mac));
+    copy_json_string(root, "label", label, sizeof(label));
+
+    cJSON *signatures = cJSON_GetObjectItemCaseSensitive(root, "signature_count");
+    cJSON *sniffer = cJSON_GetObjectItemCaseSensitive(root, "sniffer_active");
+    cJSON *frames = cJSON_GetObjectItemCaseSensitive(root, "frames_seen");
+    if (cJSON_IsNumber(signatures)) {
+        g_roadscout_signature_count = (uint32_t)signatures->valueint;
+    }
+    if (cJSON_IsBool(sniffer)) {
+        g_roadscout_sniffer_active = cJSON_IsTrue(sniffer);
+    }
+    if (cJSON_IsNumber(frames)) {
+        g_roadscout_frames_seen = (uint32_t)frames->valueint;
+    }
+
+    if (strcmp(type, "detection") == 0) {
+        g_roadscout_detection_count++;
+        snprintf(g_roadscout_last_detection,
+                 sizeof(g_roadscout_last_detection),
+                 "%.20s %.32s %.18s",
+                 label[0] != '\0' ? label : "detection",
+                 ssid[0] != '\0' ? ssid : "no-ssid",
+                 mac[0] != '\0' ? mac : "no-mac");
+        snprintf(g_roadscout_status,
+                 sizeof(g_roadscout_status),
+                 "Detection %lu via %.12s.",
+                 (unsigned long)g_roadscout_detection_count,
+                 source != NULL ? source : "serial");
+    } else {
+        snprintf(g_roadscout_status,
+                 sizeof(g_roadscout_status),
+                 "Sensor %.24s | scan %s | frames %lu | signatures %lu",
+                 device[0] != '\0' ? device : "RoadLensESP32",
+                 g_roadscout_sniffer_active ? "on" : "off",
+                 (unsigned long)g_roadscout_frames_seen,
+                 (unsigned long)g_roadscout_signature_count);
+    }
+
+    cJSON_Delete(root);
+    request_active_app_refresh();
+    return true;
+}
+
+static roadscout_line_state_t *roadscout_line_state_for_source(const char *source)
+{
+    if (source != NULL && strcmp(source, "grove-uart") == 0) {
+        return &g_roadscout_grove_line;
+    }
+    return &g_roadscout_usb_line;
+}
+
+static bool roadscout_sensor_ingest(const char *source, const uint8_t *data, size_t data_len)
+{
+    if (data == NULL || data_len == 0U) {
+        return false;
+    }
+
+    roadscout_line_state_t *state = roadscout_line_state_for_source(source);
+    bool handled = false;
+    for (size_t i = 0; i < data_len; ++i) {
+        char byte = (char)data[i];
+        if (!state->active) {
+            if (byte != '{') {
+                continue;
+            }
+            state->active = true;
+            state->length = 0;
+        }
+
+        if (byte == '\r' || byte == '\n') {
+            if (state->length > 0U) {
+                state->line[state->length] = '\0';
+                handled |= roadscout_handle_json_line(source, state->line);
+            }
+            state->length = 0;
+            state->active = false;
+            continue;
+        }
+
+        if (state->length < sizeof(state->line) - 1U) {
+            state->line[state->length++] = byte;
+        } else {
+            state->length = 0;
+            state->active = false;
+        }
+    }
+
+    return handled;
+}
+
 static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_len)
 {
     meshtastic_rx_state_t *rx_state = NULL;
@@ -2206,6 +2526,12 @@ static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_
     if (!g_meshcore_mode && rx_state != NULL && meshtastic_stream_ingest(rx_state, source, data, data_len)) {
         return;
     }
+    if (gps_stream_ingest(source, data, data_len)) {
+        return;
+    }
+    if (roadscout_sensor_ingest(source, data, data_len)) {
+        return;
+    }
     if (cardputer_keyboard_ingest(source, data, data_len)) {
         return;
     }
@@ -2215,7 +2541,11 @@ static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_
     strlcpy(g_mesh_last_received, preview, sizeof(g_mesh_last_received));
     snprintf(g_mesh_last_transport, sizeof(g_mesh_last_transport), "%s raw", source != NULL ? source : "mesh");
     g_mesh_received_count++;
+    bool first_mesh_module = !g_mesh_module_ready;
     g_mesh_module_ready = true;
+    if (first_mesh_module) {
+        announce_module_attached("Mesh serial attached", source != NULL ? source : "mesh", "mesh_serial_detected");
+    }
     mesh_record_chat_line("RX", selected_mesh_channel()->name, source != NULL ? source : "mesh", preview);
     append_mesh_message("rx", selected_mesh_channel()->name, source != NULL ? source : "mesh", preview);
     request_active_app_refresh();
@@ -2920,10 +3250,15 @@ static void format_wifi_scan_status(char *buffer, size_t buffer_size)
 
 static void format_accessory_status(char *buffer, size_t buffer_size)
 {
-    snprintf(buffer, buffer_size, "Grove %s | USB-A %s | I2C %s",
+    char modules[160];
+    format_module_summary(modules, sizeof(modules));
+    snprintf(buffer,
+             buffer_size,
+             "Rails G %s USB %s | I2C %s | %.96s",
              g_ext_power_ready ? "on" : "off",
              g_usb_power_ready ? "on" : "off",
-             g_accessory_i2c_summary);
+             g_accessory_i2c_summary,
+             modules);
 }
 
 static void refresh_wifi_widgets_locked(void)
@@ -2965,14 +3300,13 @@ static void refresh_wifi_widgets_locked(void)
 
 static void refresh_accessory_widgets_locked(void)
 {
-    char status[64];
+    char status[192];
+    char modules[160];
     format_accessory_status(status, sizeof(status));
+    format_module_summary(modules, sizeof(modules));
 
     if (g_ui.home_accessory_label != NULL) {
-        lv_label_set_text_fmt(g_ui.home_accessory_label,
-                              "G %s | USB %s",
-                              g_ext_power_ready ? "on" : "off",
-                              g_usb_power_ready ? "on" : "off");
+        lv_label_set_text(g_ui.home_accessory_label, modules);
         lv_obj_set_style_text_color(g_ui.home_accessory_label,
                                     (g_ext_power_ready || g_usb_power_ready) ? color_hex(0x6ee7a2) : color_hex(0xffc857),
                                     0);
@@ -3184,10 +3518,7 @@ static void refresh_live_stats_locked(void)
     }
 
     if (g_ui.heart_label != NULL) {
-        lv_label_set_text_fmt(g_ui.heart_label, "beat %lu | %s | C6L %lu",
-                              (unsigned long)g_heartbeat_count,
-                              battery_status,
-                              (unsigned long)g_grove_rx_packets);
+        lv_label_set_text(g_ui.heart_label, "");
     }
 
     refresh_screen_widgets_locked();
@@ -3195,6 +3526,7 @@ static void refresh_live_stats_locked(void)
     refresh_accessory_widgets_locked();
     refresh_mode_widgets();
     refresh_rotation_widgets();
+    refresh_module_popup_locked();
 }
 
 static void feature_tile_event_cb(lv_event_t *event)
@@ -3209,6 +3541,13 @@ static void feature_tile_event_cb(lv_event_t *event)
     }
 
     g_active_app = tile->app_id;
+    if (g_active_app == APP_MESHTASTIC || g_active_app == APP_MESSAGES) {
+        g_meshcore_mode = false;
+        refresh_mode_widgets();
+    } else if (g_active_app == APP_MESHCORE) {
+        g_meshcore_mode = true;
+        refresh_mode_widgets();
+    }
     show_nav_page(NAV_PAGE_APP);
     append_event(tile->event_name);
     ESP_LOGI(TABFORGE_TAG, "tile selected: %s", tile->name);
@@ -4663,6 +5002,11 @@ static void companion_add_diagnostics_json(cJSON *root)
         cJSON_AddStringToObject(hardware, "sdr", sdr_state_text());
         cJSON_AddBoolToObject(hardware, "groveReady", g_grove_uart_ready);
         cJSON_AddBoolToObject(hardware, "irReady", g_ir_probe_ready);
+        cJSON_AddBoolToObject(hardware, "usbGpsSeen", g_usb_gps_seen);
+        cJSON_AddBoolToObject(hardware, "usbGpsFix", usb_gps_recent());
+        cJSON_AddNumberToObject(hardware, "usbGpsSentences", g_usb_gps_sentence_count);
+        cJSON_AddStringToObject(hardware, "gpsSource", gps_source_setting_name(g_roadscout_gps_source));
+        cJSON_AddBoolToObject(hardware, "roadScoutSensor", g_roadscout_sensor_seen);
         cJSON_AddStringToObject(hardware, "battery", battery_status);
         cJSON_AddNumberToObject(hardware, "batteryPercent", g_battery_percent);
         cJSON_AddNumberToObject(hardware, "batteryMv", g_battery_mv);
@@ -5147,17 +5491,25 @@ static void mesh_send_text_to_node(const char *text,
 
     if (!sent && g_grove_uart_ready) {
         char frame[384];
+        double gps_lat = 0.0;
+        double gps_lon = 0.0;
+        double gps_alt = 0.0;
+        double gps_acc = 0.0;
+        char gps_source[TABFORGE_GPS_SOURCE_LEN];
+        bool gps_ready = g_mesh_gps_share_enabled &&
+                         get_selected_gps_fix(GPS_SOURCE_AUTO, &gps_lat, &gps_lon, &gps_alt, &gps_acc, gps_source, sizeof(gps_source));
         snprintf(frame,
                  sizeof(frame),
-                 "{\"tabforge\":\"mesh.text\",\"profile\":\"%s\",\"channel\":%u,\"to\":\"%.32s\",\"gps\":%s,\"phoneGps\":%s,\"lat\":%.7f,\"lon\":%.7f,\"acc\":%.1f,\"voice\":%s,\"text\":\"%.96s\"}",
+                 "{\"tabforge\":\"mesh.text\",\"profile\":\"%s\",\"channel\":%u,\"to\":\"%.32s\",\"gps\":%s,\"gpsSource\":\"%.19s\",\"phoneGps\":%s,\"lat\":%.7f,\"lon\":%.7f,\"acc\":%.1f,\"voice\":%s,\"text\":\"%.96s\"}",
                  selected_mesh_profile_name(),
                  (unsigned)channel->index,
                  node->node_id,
-                 g_mesh_gps_share_enabled ? "true" : "false",
-                 (g_mesh_gps_share_enabled && g_companion.location_ready) ? "true" : "false",
-                 (g_mesh_gps_share_enabled && g_companion.location_ready) ? g_companion.latitude : 0.0,
-                 (g_mesh_gps_share_enabled && g_companion.location_ready) ? g_companion.longitude : 0.0,
-                 (g_mesh_gps_share_enabled && g_companion.location_ready) ? g_companion.accuracy_m : 0.0,
+                 gps_ready ? "true" : "false",
+                 gps_ready ? gps_source : "none",
+                 (gps_ready && strcmp(gps_source, "phone") == 0) ? "true" : "false",
+                 gps_ready ? gps_lat : 0.0,
+                 gps_ready ? gps_lon : 0.0,
+                 gps_ready ? gps_acc : 0.0,
                  voice ? "true" : "false",
                  text);
         grove_uart_send_line(frame);
@@ -5439,6 +5791,212 @@ static void sdr_log_status_button_event_cb(lv_event_t *event)
     }
     append_event("sdr_status_logged");
     set_activity("SDR Status", g_sdr_status);
+    request_active_app_refresh();
+}
+
+static void copy_json_safe_ascii(char *dst, size_t dst_size, const char *src)
+{
+    if (dst == NULL || dst_size == 0U) {
+        return;
+    }
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+
+    size_t out = 0;
+    for (size_t i = 0; src[i] != '\0' && out < dst_size - 1U; ++i) {
+        unsigned char ch = (unsigned char)src[i];
+        if (ch == '"' || ch == '\\') {
+            dst[out++] = '\'';
+        } else if (ch >= 32U && ch <= 126U) {
+            dst[out++] = (char)ch;
+        } else {
+            dst[out++] = ' ';
+        }
+    }
+    dst[out] = '\0';
+}
+
+static bool roadscout_send_sensor_command(const char *command, const char *label)
+{
+    if (command == NULL || command[0] == '\0') {
+        return false;
+    }
+
+    char line[48];
+    snprintf(line, sizeof(line), "%.40s\n", command);
+    bool sent = false;
+    if (g_usb_state == USB_STATE_OPEN) {
+        sent |= usb_cdc_send_bytes((const uint8_t *)line, strlen(line), label != NULL ? label : "roadscout");
+    }
+    if (g_grove_uart_ready) {
+        grove_uart_send_line(command);
+        sent = true;
+    }
+    return sent;
+}
+
+static bool roadscout_append_point(const char *kind)
+{
+    if (!g_sd_ready) {
+        strlcpy(g_roadscout_status, "SD card is not mounted; cannot log point.", sizeof(g_roadscout_status));
+        return false;
+    }
+
+    double lat = 0.0;
+    double lon = 0.0;
+    double alt = 0.0;
+    double acc = 0.0;
+    char source[TABFORGE_GPS_SOURCE_LEN];
+    if (!get_selected_gps_fix(g_roadscout_gps_source, &lat, &lon, &alt, &acc, source, sizeof(source))) {
+        strlcpy(g_roadscout_status, "No GPS fix from the selected source.", sizeof(g_roadscout_status));
+        return false;
+    }
+
+    ensure_dir(TABFORGE_SD_ROOT "/tabforge");
+    ensure_dir(TABFORGE_SD_ROOT "/tabforge/roadscout");
+    FILE *f = fopen(TABFORGE_ROADSCOUT_LOG_PATH, "a");
+    if (f == NULL) {
+        strlcpy(g_roadscout_status, "Could not open /tabforge/roadscout/points.jsonl.", sizeof(g_roadscout_status));
+        return false;
+    }
+
+    char ssid[40] = "";
+    int rssi = 0;
+    uint8_t channel = 0;
+    if (g_wifi_ap_count > 0) {
+        wifi_ap_record_t *ap = &g_wifi_aps[g_wifi_selected_ap % g_wifi_ap_count];
+        copy_json_safe_ascii(ssid, sizeof(ssid), (const char *)ap->ssid);
+        rssi = ap->rssi;
+        channel = ap->primary;
+    } else {
+        strlcpy(ssid, "none", sizeof(ssid));
+    }
+
+    fprintf(f,
+            "{\"kind\":\"%.20s\",\"version\":\"%s\",\"gpsSource\":\"%.19s\",\"lat\":%.7f,\"lon\":%.7f,\"alt\":%.1f,\"acc\":%.1f,\"wifiSsid\":\"%.39s\",\"wifiRssi\":%d,\"wifiChannel\":%u,\"roadSensor\":%s,\"detections\":%lu,\"frames\":%lu,\"signatures\":%lu}\n",
+            kind != NULL ? kind : "point",
+            TABFORGE_VERSION,
+            source,
+            lat,
+            lon,
+            alt,
+            acc,
+            ssid,
+            rssi,
+            (unsigned)channel,
+            g_roadscout_sensor_seen ? "true" : "false",
+            (unsigned long)g_roadscout_detection_count,
+            (unsigned long)g_roadscout_frames_seen,
+            (unsigned long)g_roadscout_signature_count);
+    fclose(f);
+
+    if (kind != NULL && strcmp(kind, "wardrive") == 0) {
+        g_wardrive_log_count++;
+        snprintf(g_wardrive_status,
+                 sizeof(g_wardrive_status),
+                 "Logged %.24s at %.5f %.5f.",
+                 ssid,
+                 lat,
+                 lon);
+    } else {
+        g_roadscout_log_count++;
+        snprintf(g_roadscout_status,
+                 sizeof(g_roadscout_status),
+                 "Logged Road Scout point %lu from %.12s.",
+                 (unsigned long)g_roadscout_log_count,
+                 source);
+    }
+    append_event(kind != NULL && strcmp(kind, "wardrive") == 0 ? "wardrive_point_logged" : "roadscout_point_logged");
+    return true;
+}
+
+static void roadscout_gps_source_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    g_roadscout_gps_source = (gps_source_t)(((uint8_t)g_roadscout_gps_source + 1U) % 3U);
+    snprintf(g_roadscout_status,
+             sizeof(g_roadscout_status),
+             "GPS source set to %s.",
+             gps_source_setting_name(g_roadscout_gps_source));
+    set_activity("Road Scout GPS", g_roadscout_status);
+    append_event("roadscout_gps_source_changed");
+    request_active_app_refresh();
+}
+
+static void roadscout_probe_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    g_roadscout_probe_count++;
+    bool sent = roadscout_send_sensor_command("status", "roadscout status");
+    if (!sent) {
+        sent = roadscout_send_sensor_command("ping", "roadscout ping");
+    }
+    snprintf(g_roadscout_status,
+             sizeof(g_roadscout_status),
+             sent ? "Sent RoadLens sensor status probe." : "No USB CDC or Grove serial sensor transport is ready.");
+    set_activity("Road Scout", g_roadscout_status);
+    append_event(sent ? "roadscout_probe_sent" : "roadscout_probe_failed");
+    request_active_app_refresh();
+}
+
+static void roadscout_start_sweep_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    g_roadscout_start_count++;
+    bool sent = roadscout_send_sensor_command("start-scan", "roadscout start");
+    if (sent) {
+        g_roadscout_sniffer_active = true;
+        strlcpy(g_roadscout_status, "Requested RoadLens ESP32 passive Wi-Fi sweep.", sizeof(g_roadscout_status));
+    } else {
+        strlcpy(g_roadscout_status,
+                "Raw passive Wi-Fi sweep needs a RoadLens ESP32 sensor or monitor-mode radio.",
+                sizeof(g_roadscout_status));
+    }
+    set_activity("Road Scout Sweep", g_roadscout_status);
+    append_event(sent ? "roadscout_sweep_started" : "roadscout_sweep_needs_sensor");
+    request_active_app_refresh();
+}
+
+static void roadscout_log_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    bool ok = roadscout_append_point("roadscout");
+    set_activity(ok ? "Road Scout Log" : "Road Scout", g_roadscout_status);
+    request_active_app_refresh();
+}
+
+static void wardrive_scan_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    xTaskCreate(wifi_scan_task, "tabforge-wardrive-scan", 6144, NULL, 5, NULL);
+    strlcpy(g_wardrive_status, "Wi-Fi scan requested for wardrive survey.", sizeof(g_wardrive_status));
+    set_activity("Wardrive", g_wardrive_status);
+    append_event("wardrive_wifi_scan");
+    request_active_app_refresh();
+}
+
+static void wardrive_log_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    bool ok = roadscout_append_point("wardrive");
+    set_activity(ok ? "Wardrive Log" : "Wardrive", ok ? g_wardrive_status : g_roadscout_status);
     request_active_app_refresh();
 }
 
@@ -5782,6 +6340,47 @@ static void mini_app_run_action(uint8_t index)
             snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.31s has no SDR handler.", action->label);
             set_activity("Mini App", g_mini_app_status);
         }
+    } else if (strcmp(action->mode, "roadscout-open") == 0) {
+        g_active_app = APP_ROADSCOUT;
+        show_nav_page(NAV_PAGE_APP);
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "Opened Road Scout.");
+        set_activity("Road Scout", g_roadscout_status);
+    } else if (strcmp(action->mode, "roadscout-gps") == 0) {
+        g_roadscout_gps_source = (gps_source_t)(((uint8_t)g_roadscout_gps_source + 1U) % 3U);
+        snprintf(g_mini_app_status,
+                 sizeof(g_mini_app_status),
+                 "GPS source %s.",
+                 gps_source_setting_name(g_roadscout_gps_source));
+        set_activity("Road Scout GPS", g_mini_app_status);
+    } else if (strcmp(action->mode, "roadscout-probe") == 0) {
+        bool sent = roadscout_send_sensor_command("status", "roadscout status");
+        snprintf(g_mini_app_status,
+                 sizeof(g_mini_app_status),
+                 sent ? "RoadLens status probe sent." : "No RoadLens serial transport.");
+        set_activity("Road Scout", g_mini_app_status);
+    } else if (strcmp(action->mode, "roadscout-start") == 0) {
+        bool sent = roadscout_send_sensor_command("start-scan", "roadscout start");
+        snprintf(g_mini_app_status,
+                 sizeof(g_mini_app_status),
+                 sent ? "RoadLens sweep requested." : "Attach RoadLens ESP32 sensor for passive sweep.");
+        set_activity("Road Scout", g_mini_app_status);
+    } else if (strcmp(action->mode, "roadscout-log") == 0) {
+        bool ok = roadscout_append_point("roadscout");
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.111s", ok ? g_roadscout_status : "No GPS/SD for Road Scout log.");
+        set_activity("Road Scout Log", g_mini_app_status);
+    } else if (strcmp(action->mode, "wardrive-open") == 0) {
+        g_active_app = APP_WARDRIVE;
+        show_nav_page(NAV_PAGE_APP);
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "Opened Wardrive.");
+        set_activity("Wardrive", g_wardrive_status);
+    } else if (strcmp(action->mode, "wardrive-scan") == 0) {
+        xTaskCreate(wifi_scan_task, "tabforge-wardrive-scan", 6144, NULL, 5, NULL);
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "Wardrive Wi-Fi scan requested.");
+        set_activity("Wardrive", g_mini_app_status);
+    } else if (strcmp(action->mode, "wardrive-log") == 0) {
+        bool ok = roadscout_append_point("wardrive");
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.111s", ok ? g_wardrive_status : "No GPS/SD for wardrive log.");
+        set_activity("Wardrive Log", g_mini_app_status);
     } else if (action->has_ir) {
         esp_err_t err = ir_send_nec_command((uint8_t)(action->command & 0xffU), action->label);
         snprintf(g_mini_app_status,
@@ -6074,12 +6673,15 @@ static app_id_t cardputer_app_from_name(const char *app)
     }
     if (strcmp(app, "wifi") == 0) return APP_WIFI;
     if (strcmp(app, "messages") == 0 || strcmp(app, "mesh") == 0) return APP_MESSAGES;
+    if (strcmp(app, "meshtastic") == 0 || strcmp(app, "mestic") == 0 || strcmp(app, "lora") == 0) return APP_MESHTASTIC;
     if (strcmp(app, "meshcore") == 0 || strcmp(app, "core") == 0) return APP_MESHCORE;
     if (strcmp(app, "tdeck") == 0 || strcmp(app, "zdeck") == 0) return APP_TDECK;
     if (strcmp(app, "ir") == 0 || strcmp(app, "remote") == 0) return APP_IR;
     if (strcmp(app, "recorder") == 0 || strcmp(app, "mic") == 0) return APP_RECORDER;
     if (strcmp(app, "usb") == 0) return APP_USB;
     if (strcmp(app, "sdr") == 0) return APP_SDR;
+    if (strcmp(app, "roadscout") == 0 || strcmp(app, "road-scout") == 0 || strcmp(app, "roadlens") == 0) return APP_ROADSCOUT;
+    if (strcmp(app, "wardrive") == 0 || strcmp(app, "war-drive") == 0 || strcmp(app, "survey") == 0) return APP_WARDRIVE;
     if (strcmp(app, "cardputer") == 0 || strcmp(app, "keyboard") == 0) return APP_CARDPUTER;
     if (strcmp(app, "files") == 0 || strcmp(app, "sd") == 0) return APP_FILES;
     if (strcmp(app, "store") == 0 || strcmp(app, "apps-store") == 0) return APP_STORE;
@@ -6110,6 +6712,11 @@ static void cardputer_open_tab_app_locked(const char *app)
     }
 
     g_active_app = app_id;
+    if (app_id == APP_MESHTASTIC || app_id == APP_MESSAGES) {
+        g_meshcore_mode = false;
+    } else if (app_id == APP_MESHCORE) {
+        g_meshcore_mode = true;
+    }
     show_nav_page(NAV_PAGE_APP);
     const feature_tile_t *tile = find_tile_by_app(app_id);
     set_activity("Cardputer", tile != NULL ? tile->name : "Opened app.");
@@ -6142,6 +6749,8 @@ static bool cardputer_run_tab_action_locked(const char *action)
         show_nav_page(NAV_PAGE_UPDATE);
     } else if (strcmp(action, "messages-open") == 0 || strcmp(action, "mesh-open") == 0) {
         cardputer_open_tab_app_locked("messages");
+    } else if (strcmp(action, "meshtastic-open") == 0 || strcmp(action, "mestic-open") == 0) {
+        cardputer_open_tab_app_locked("meshtastic");
     } else if (strcmp(action, "meshcore-open") == 0) {
         cardputer_open_tab_app_locked("meshcore");
     } else if (strcmp(action, "meshcore-help") == 0 || strcmp(action, "core-help") == 0) {
@@ -6302,6 +6911,32 @@ static bool cardputer_run_tab_action_locked(const char *action)
     } else if (strcmp(action, "sdr-status") == 0) {
         append_event("sdr_status_logged");
         set_activity("SDR Status", g_sdr_status);
+    } else if (strcmp(action, "roadscout-open") == 0 || strcmp(action, "roadlens-open") == 0) {
+        cardputer_open_tab_app_locked("roadscout");
+    } else if (strcmp(action, "roadscout-gps") == 0) {
+        g_roadscout_gps_source = (gps_source_t)(((uint8_t)g_roadscout_gps_source + 1U) % 3U);
+        set_activity("Road Scout GPS", gps_source_setting_name(g_roadscout_gps_source));
+    } else if (strcmp(action, "roadscout-probe") == 0) {
+        (void)roadscout_send_sensor_command("status", "roadscout status");
+        cardputer_open_tab_app_locked("roadscout");
+        set_activity("Road Scout", g_roadscout_status);
+    } else if (strcmp(action, "roadscout-start") == 0 || strcmp(action, "roadscout-sweep") == 0) {
+        bool sent = roadscout_send_sensor_command("start-scan", "roadscout start");
+        cardputer_open_tab_app_locked("roadscout");
+        set_activity("Road Scout Sweep", sent ? "RoadLens sweep requested." : "Attach RoadLens ESP32 sensor.");
+    } else if (strcmp(action, "roadscout-log") == 0) {
+        (void)roadscout_append_point("roadscout");
+        cardputer_open_tab_app_locked("roadscout");
+        set_activity("Road Scout Log", g_roadscout_status);
+    } else if (strcmp(action, "wardrive-open") == 0) {
+        cardputer_open_tab_app_locked("wardrive");
+    } else if (strcmp(action, "wardrive-scan") == 0) {
+        xTaskCreate(wifi_scan_task, "tabforge-wardrive-scan", 6144, NULL, 5, NULL);
+        cardputer_open_tab_app_locked("wardrive");
+    } else if (strcmp(action, "wardrive-log") == 0) {
+        (void)roadscout_append_point("wardrive");
+        cardputer_open_tab_app_locked("wardrive");
+        set_activity("Wardrive Log", g_wardrive_status);
     } else if (strcmp(action, "store-open") == 0) {
         cardputer_open_tab_app_locked("store");
     } else if (strcmp(action, "store-fetch") == 0) {
@@ -6512,11 +7147,11 @@ static void add_home_nav_shortcut(lv_obj_t *parent,
     lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(button, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(button, 8, 0);
+    lv_obj_set_style_pad_row(button, 6, 0);
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(button, cb, LV_EVENT_CLICKED, NULL);
 
-    lv_coord_t circle = height > 132 ? 104 : height - 34;
+    lv_coord_t circle = height > 128 ? 88 : height - 34;
     if (circle < 64) {
         circle = 64;
     }
@@ -6572,11 +7207,11 @@ static void add_home_app_shortcut(lv_obj_t *parent,
     lv_obj_clear_flag(button, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(button, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(button, 8, 0);
+    lv_obj_set_style_pad_row(button, 6, 0);
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(button, feature_tile_event_cb, LV_EVENT_CLICKED, (void *)tile);
 
-    lv_coord_t circle = height > 132 ? 104 : height - 34;
+    lv_coord_t circle = height > 128 ? 88 : height - 34;
     if (circle < 64) {
         circle = 64;
     }
@@ -6622,26 +7257,26 @@ static void build_home_page(lv_obj_t *parent, lv_coord_t width, lv_coord_t heigh
     lv_obj_set_scrollbar_mode(parent, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_flex_flow(parent, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(parent, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(parent, 18, 0);
-    lv_obj_set_style_pad_column(parent, 18, 0);
+    lv_obj_set_style_pad_row(parent, 12, 0);
+    lv_obj_set_style_pad_column(parent, 12, 0);
 
     lv_coord_t columns = landscape && width >= 900 ? 4 : 2;
     lv_coord_t rows = columns == 4 ? 2 : 4;
-    lv_coord_t tile_w = (width - ((columns - 1) * 18)) / columns;
-    lv_coord_t tile_h = (height - ((rows - 1) * 18)) / rows;
+    lv_coord_t tile_w = (width - ((columns - 1) * 12)) / columns;
+    lv_coord_t tile_h = (height - ((rows - 1) * 12)) / rows;
     if (tile_h < 92) {
         tile_h = 92;
     }
-    if (tile_h > 154) {
-        tile_h = 154;
+    if (tile_h > 138) {
+        tile_h = 138;
     }
 
     add_home_nav_shortcut(parent, LV_SYMBOL_LIST, "Apps", "All tools", 0x6ee7a2, tile_w, tile_h, apps_button_event_cb);
     add_home_nav_shortcut(parent, LV_SYMBOL_SETTINGS, "Settings", "Display + power", 0x61d5f0, tile_w, tile_h, settings_button_event_cb);
-    add_home_app_shortcut(parent, find_tile_by_app(APP_MESSAGES), tile_w, tile_h);
+    add_home_app_shortcut(parent, find_tile_by_app(APP_MESHTASTIC), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_MESHCORE), tile_w, tile_h);
-    add_home_app_shortcut(parent, find_tile_by_app(APP_TDECK), tile_w, tile_h);
-    add_home_app_shortcut(parent, find_tile_by_app(APP_IR), tile_w, tile_h);
+    add_home_app_shortcut(parent, find_tile_by_app(APP_ROADSCOUT), tile_w, tile_h);
+    add_home_app_shortcut(parent, find_tile_by_app(APP_WARDRIVE), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_SDR), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_STORE), tile_w, tile_h);
 }
@@ -7182,18 +7817,19 @@ static void add_app_actions(lv_obj_t *parent,
     lv_obj_t *actions = lv_obj_create(parent);
     lv_obj_remove_style_all(actions);
     lv_coord_t action_h = landscape ? 112 : 236;
-    if (app_id == APP_MESSAGES) {
+    if (app_id == APP_MESSAGES || app_id == APP_MESHTASTIC) {
         action_h = landscape ? 212 : 408;
     } else if (app_id == APP_MESHCORE || app_id == APP_TDECK || app_id == APP_RECORDER ||
                app_id == APP_USB || app_id == APP_IR || app_id == APP_SDR ||
+               app_id == APP_ROADSCOUT || app_id == APP_WARDRIVE ||
                app_id == APP_CARDPUTER || app_id == APP_FILES || app_id == APP_STORE) {
         action_h = landscape ? 150 : 348;
     }
     lv_obj_set_size(actions, width, action_h);
-    if (app_id == APP_MESSAGES || app_id == APP_MESHCORE || app_id == APP_TDECK ||
+    if (app_id == APP_MESSAGES || app_id == APP_MESHTASTIC || app_id == APP_MESHCORE || app_id == APP_TDECK ||
         app_id == APP_RECORDER || app_id == APP_USB || app_id == APP_IR ||
-        app_id == APP_SDR || app_id == APP_CARDPUTER || app_id == APP_FILES ||
-        app_id == APP_STORE) {
+        app_id == APP_SDR || app_id == APP_ROADSCOUT || app_id == APP_WARDRIVE ||
+        app_id == APP_CARDPUTER || app_id == APP_FILES || app_id == APP_STORE) {
         lv_obj_add_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scrollbar_mode(actions, LV_SCROLLBAR_MODE_AUTO);
     } else {
@@ -7221,6 +7857,7 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
         break;
     case APP_MESSAGES:
+    case APP_MESHTASTIC:
         make_button(actions, button_w, "Channel", mesh_next_channel_button_event_cb);
         make_button(actions, button_w, "Node", mesh_next_node_button_event_cb);
         make_button(actions, button_w, "Draft", mesh_next_draft_button_event_cb);
@@ -7275,6 +7912,22 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Scan RTL", sdr_scan_button_event_cb);
         make_button(actions, button_w, "Next Band", sdr_next_preset_button_event_cb);
         make_button(actions, button_w, "Log Status", sdr_log_status_button_event_cb);
+        make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
+        break;
+    case APP_ROADSCOUT:
+        make_button(actions, button_w, "GPS Source", roadscout_gps_source_button_event_cb);
+        make_button(actions, button_w, "Sensor Probe", roadscout_probe_button_event_cb);
+        make_button(actions, button_w, "Start Sweep", roadscout_start_sweep_button_event_cb);
+        make_button(actions, button_w, "Log Point", roadscout_log_button_event_cb);
+        make_button(actions, button_w, "Wi-Fi Scan", wardrive_scan_button_event_cb);
+        make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
+        break;
+    case APP_WARDRIVE:
+        make_button(actions, button_w, "Wi-Fi Scan", wardrive_scan_button_event_cb);
+        make_button(actions, button_w, "Next AP", wifi_next_button_event_cb);
+        make_button(actions, button_w, "GPS Source", roadscout_gps_source_button_event_cb);
+        make_button(actions, button_w, "Log Point", wardrive_log_button_event_cb);
+        make_button(actions, button_w, "Road Scout", roadscout_probe_button_event_cb);
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
         break;
     case APP_CARDPUTER:
@@ -7387,6 +8040,7 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Update", line_c, width - 32, 0xffc857);
         break;
     case APP_MESSAGES:
+    case APP_MESHTASTIC:
         render_mesh_messenger_locked(card, width - 32, landscape);
         break;
     case APP_MESHCORE:
@@ -7477,6 +8131,63 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Device", line_b, width - 32, 0xf1f7f3);
         add_app_status_line(card, "Preset", line_c, width - 32, 0x69d2e7);
         add_app_status_line(card, "Status", g_sdr_status, width - 32, g_sdr_state == SDR_STATE_ERROR ? 0xff7a66 : 0x93a6ad);
+        break;
+    }
+    case APP_ROADSCOUT: {
+        char gps_status[128];
+        format_gps_status(gps_status, sizeof(gps_status));
+        snprintf(line_a,
+                 sizeof(line_a),
+                 "Selected %s | %s",
+                 gps_source_setting_name(g_roadscout_gps_source),
+                 gps_status);
+        snprintf(line_b,
+                 sizeof(line_b),
+                 "USB GPS %s | sentences %lu | fixes %lu | last %.12s",
+                 usb_gps_recent() ? "fix" : (g_usb_gps_seen ? "seen" : "off"),
+                 (unsigned long)g_usb_gps_sentence_count,
+                 (unsigned long)g_usb_gps_fix_count,
+                 g_usb_gps_time);
+        snprintf(line_c,
+                 sizeof(line_c),
+                 "Sensor %s | sweep %s | detections %lu | signatures %lu",
+                 g_roadscout_sensor_seen ? "seen" : "needed",
+                 g_roadscout_sniffer_active ? "on" : "off",
+                 (unsigned long)g_roadscout_detection_count,
+                 (unsigned long)g_roadscout_signature_count);
+        add_app_status_line(card, "GPS", line_a, width - 32, get_selected_gps_fix(g_roadscout_gps_source, NULL, NULL, NULL, NULL, NULL, 0) ? 0x77dd88 : 0xffc857);
+        add_app_status_line(card, "Attached", line_b, width - 32, usb_gps_recent() ? 0x77dd88 : 0x93a6ad);
+        add_app_status_line(card, "RoadLens", line_c, width - 32, g_roadscout_sensor_seen ? 0x77dd88 : 0xffc857);
+        add_app_status_line(card, "Sweep", "Tab internal hosted Wi-Fi is for station scans here; raw passive frame sweep needs the RoadLens ESP32 sensor.", width - 32, 0x93a6ad);
+        add_app_status_line(card, "Status", g_roadscout_status, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Last", g_roadscout_last_detection, width - 32, 0x70a7ff);
+        break;
+    }
+    case APP_WARDRIVE: {
+        char gps_status[128];
+        char wifi_status[96];
+        format_gps_status(gps_status, sizeof(gps_status));
+        format_wifi_scan_status(wifi_status, sizeof(wifi_status));
+        snprintf(line_a,
+                 sizeof(line_a),
+                 "%s | APs %u | logs %lu",
+                 wifi_status,
+                 (unsigned)g_wifi_ap_count,
+                 (unsigned long)g_wardrive_log_count);
+        snprintf(line_b,
+                 sizeof(line_b),
+                 "GPS %s | USB %s | phone %s",
+                 gps_status,
+                 usb_gps_recent() ? "fix" : (g_usb_gps_seen ? "seen" : "off"),
+                 companion_gps_recent() ? "ready" : "off");
+        snprintf(line_c,
+                 sizeof(line_c),
+                 "SD %s | /tabforge/roadscout/points.jsonl",
+                 g_sd_ready ? "ready" : "missing");
+        add_app_status_line(card, "Survey", line_a, width - 32, 0x77dd88);
+        add_app_status_line(card, "Location", line_b, width - 32, get_selected_gps_fix(g_roadscout_gps_source, NULL, NULL, NULL, NULL, NULL, 0) ? 0x77dd88 : 0xffc857);
+        add_app_status_line(card, "Log", line_c, width - 32, g_sd_ready ? 0xf1f7f3 : 0xff7a66);
+        add_app_status_line(card, "Status", g_wardrive_status, width - 32, 0x93a6ad);
         break;
     }
     case APP_CARDPUTER: {
@@ -7631,6 +8342,31 @@ static void build_dock(lv_obj_t *screen, lv_coord_t width, lv_coord_t height)
     lv_obj_move_foreground(dock);
 }
 
+static void build_module_popup(lv_obj_t *screen, lv_coord_t screen_w)
+{
+    lv_coord_t popup_w = screen_w > 540 ? 420 : screen_w - 24;
+    if (popup_w < 280) {
+        popup_w = 280;
+    }
+
+    g_ui.module_popup = make_panel(screen, popup_w, 74, 0x10161a, 0x6ee7a2);
+    lv_obj_add_flag(g_ui.module_popup, LV_OBJ_FLAG_FLOATING);
+    lv_obj_add_flag(g_ui.module_popup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_shadow_width(g_ui.module_popup, 12, 0);
+    lv_obj_set_style_shadow_color(g_ui.module_popup, color_hex(0x000000), 0);
+    lv_obj_set_style_shadow_opa(g_ui.module_popup, LV_OPA_40, 0);
+    lv_obj_set_style_pad_all(g_ui.module_popup, 10, 0);
+    lv_obj_set_flex_flow(g_ui.module_popup, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(g_ui.module_popup, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(g_ui.module_popup, 3, 0);
+    lv_obj_align(g_ui.module_popup, LV_ALIGN_TOP_RIGHT, -12, 70);
+
+    g_ui.module_popup_title_label = make_text(g_ui.module_popup, "", 0x6ee7a2, popup_w - 24);
+    g_ui.module_popup_detail_label = make_text(g_ui.module_popup, "", 0xf1f7f3, popup_w - 24);
+    lv_label_set_long_mode(g_ui.module_popup_detail_label, LV_LABEL_LONG_CLIP);
+    lv_obj_move_foreground(g_ui.module_popup);
+}
+
 static void build_dashboard(lv_obj_t *screen)
 {
     memset(&g_ui, 0, sizeof(g_ui));
@@ -7665,6 +8401,7 @@ static void build_dashboard(lv_obj_t *screen)
 
     build_side_rail(workspace, rail_w, workspace_h);
     build_body(workspace, body_w, workspace_h, landscape);
+    build_module_popup(screen, screen_w);
     show_nav_page(g_nav_page);
 
     refresh_live_stats_locked();
