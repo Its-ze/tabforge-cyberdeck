@@ -8171,7 +8171,7 @@ static void render_active_app_page_locked(void)
         break;
     }
     case APP_ROADSCOUT: {
-        char gps_status[128];
+        char gps_status[72];
         format_gps_status(gps_status, sizeof(gps_status));
         snprintf(line_a,
                  sizeof(line_a),
@@ -8201,8 +8201,8 @@ static void render_active_app_page_locked(void)
         break;
     }
     case APP_WARDRIVE: {
-        char gps_status[128];
-        char wifi_status[96];
+        char gps_status[64];
+        char wifi_status[64];
         format_gps_status(gps_status, sizeof(gps_status));
         format_wifi_scan_status(wifi_status, sizeof(wifi_status));
         snprintf(line_a,
