@@ -600,6 +600,53 @@ static char g_module_popup_title[TABFORGE_MODULE_POPUP_TITLE_LEN] = "";
 static char g_module_popup_detail[TABFORGE_MODULE_POPUP_DETAIL_LEN] = "";
 static uint64_t g_module_popup_until_ms;
 static bool g_module_popup_dirty;
+
+static void *tabforge_json_malloc(size_t size)
+{
+    if (size == 0U) {
+        return NULL;
+    }
+
+    void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ptr == NULL) {
+        ptr = heap_caps_malloc(size, MALLOC_CAP_8BIT);
+    }
+    return ptr;
+}
+
+static void tabforge_json_free(void *ptr)
+{
+    heap_caps_free(ptr);
+}
+
+static void init_json_allocator(void)
+{
+    cJSON_Hooks hooks = {
+        .malloc_fn = tabforge_json_malloc,
+        .free_fn = tabforge_json_free,
+    };
+    cJSON_InitHooks(&hooks);
+}
+
+static char *tabforge_alloc_json_buffer(size_t size, const char *label)
+{
+    char *buffer = (char *)heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buffer == NULL) {
+        buffer = (char *)heap_caps_malloc(size, MALLOC_CAP_8BIT);
+    }
+    if (buffer == NULL) {
+        ESP_LOGW(TABFORGE_TAG,
+                 "%s allocation failed: %u bytes requested, internal free %u largest %u, psram free %u largest %u",
+                 label != NULL ? label : "JSON buffer",
+                 (unsigned)size,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    }
+    return buffer;
+}
+
 static bool g_ext_power_ready;
 static esp_err_t g_ext_power_error = ESP_OK;
 static bool g_usb_power_ready;
@@ -1574,7 +1621,7 @@ static void load_runtime_config(void)
         return;
     }
 
-    char *json = heap_caps_malloc((size_t)file_size + 1U, MALLOC_CAP_INTERNAL);
+    char *json = tabforge_alloc_json_buffer((size_t)file_size + 1U, "runtime config");
     if (json == NULL) {
         fclose(f);
         return;
@@ -4142,7 +4189,7 @@ static esp_err_t app_store_select_from_cache(uint32_t selected_index)
         return ESP_ERR_INVALID_STATE;
     }
 
-    char *manifest = heap_caps_malloc(TABFORGE_APP_STORE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    char *manifest = tabforge_alloc_json_buffer(TABFORGE_APP_STORE_MAX_BYTES, "app catalog cache");
     if (manifest == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -4203,7 +4250,7 @@ static esp_err_t app_store_select_by_id_from_cache(const char *id)
         return ESP_ERR_INVALID_STATE;
     }
 
-    char *manifest = heap_caps_malloc(TABFORGE_APP_STORE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    char *manifest = tabforge_alloc_json_buffer(TABFORGE_APP_STORE_MAX_BYTES, "app catalog lookup");
     if (manifest == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -4223,7 +4270,7 @@ static esp_err_t app_store_select_by_id_fetching_if_needed(const char *id)
         return err;
     }
 
-    char *manifest = heap_caps_malloc(TABFORGE_APP_STORE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    char *manifest = tabforge_alloc_json_buffer(TABFORGE_APP_STORE_MAX_BYTES, "app catalog fetch");
     if (manifest == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -4256,7 +4303,7 @@ static void app_store_fetch_task(void *arg)
     g_app_store_last_error = ESP_OK;
     update_activity_from_task("App Store", "Fetching GitHub catalog.");
 
-    char *manifest = heap_caps_malloc(TABFORGE_APP_STORE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    char *manifest = tabforge_alloc_json_buffer(TABFORGE_APP_STORE_MAX_BYTES, "app store fetch");
     if (manifest == NULL) {
         g_app_store_state = APP_STORE_ERROR;
         g_app_store_last_error = ESP_ERR_NO_MEM;
@@ -4334,7 +4381,7 @@ static void app_store_install_task(void *arg)
     g_app_store_last_error = ESP_OK;
     update_activity_from_task("App Store", g_app_store_selected.name);
 
-    char *package = heap_caps_malloc(TABFORGE_APP_PACKAGE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    char *package = tabforge_alloc_json_buffer(TABFORGE_APP_PACKAGE_MAX_BYTES, "app package install");
     if (package == NULL) {
         g_app_store_state = APP_STORE_ERROR;
         g_app_store_last_error = ESP_ERR_NO_MEM;
@@ -4527,7 +4574,7 @@ static void app_store_launch_selected(void)
 
     char install_path[128];
     snprintf(install_path, sizeof(install_path), TABFORGE_SD_ROOT "/tabforge/apps/%.31s.json", g_app_store_selected.id);
-    char *package = heap_caps_malloc(TABFORGE_APP_PACKAGE_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    char *package = tabforge_alloc_json_buffer(TABFORGE_APP_PACKAGE_MAX_BYTES, "app package launch");
     if (package == NULL) {
         g_app_store_state = APP_STORE_ERROR;
         g_app_store_last_error = ESP_ERR_NO_MEM;
@@ -4616,7 +4663,7 @@ static int compare_versions(const char *left, const char *right)
 
 static esp_err_t fetch_manifest_firmware_url(void)
 {
-    char *manifest = heap_caps_malloc(TABFORGE_OTA_MANIFEST_MAX_BYTES, MALLOC_CAP_INTERNAL);
+    char *manifest = tabforge_alloc_json_buffer(TABFORGE_OTA_MANIFEST_MAX_BYTES, "OTA manifest");
     if (manifest == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -9525,6 +9572,7 @@ static void heartbeat_task(void *arg)
 void app_main(void)
 {
     init_nvs();
+    init_json_allocator();
     load_screen_settings();
     init_network_stack();
     log_boot_status();
