@@ -2287,6 +2287,7 @@ static bool gps_handle_nmea_line(const char *source, const char *line)
     strlcpy(g_usb_gps_source, gps_transport_label(source), sizeof(g_usb_gps_source));
     if (first_sentence) {
         announce_module_attached(gps_transport_label(source), "NMEA stream detected; waiting for a valid fix.", "gps_nmea_detected");
+        ESP_LOGI(TABFORGE_TAG, "%s NMEA stream detected", gps_transport_label(source));
     }
 
     char time_field[16] = "";
@@ -2350,6 +2351,13 @@ static bool gps_handle_nmea_line(const char *source, const char *line)
     }
     if (first_fix) {
         announce_module_attached("GPS fix acquired", gps_transport_label(source), "gps_fix_acquired");
+        ESP_LOGI(TABFORGE_TAG,
+                 "%s fix %.7f %.7f alt %.1f acc %.1f",
+                 gps_transport_label(source),
+                 g_usb_gps_latitude,
+                 g_usb_gps_longitude,
+                 g_usb_gps_altitude_m,
+                 g_usb_gps_accuracy_m);
     }
     request_active_app_refresh();
     return true;
@@ -8966,6 +8974,13 @@ static void usb_cdc_set_baudrate(uint32_t baudrate, const char *reason)
     if (err == ESP_OK) {
         g_usb_cdc_baudrate = baudrate;
         ESP_LOGI(TABFORGE_TAG, "USB CDC baud set to %lu%s%s",
+                 (unsigned long)baudrate,
+                 reason != NULL && reason[0] != '\0' ? " for " : "",
+                 reason != NULL && reason[0] != '\0' ? reason : "");
+    } else if (err == ESP_ERR_NOT_SUPPORTED) {
+        g_usb_cdc_baudrate = baudrate;
+        ESP_LOGW(TABFORGE_TAG,
+                 "USB CDC line coding unsupported; assuming adapter default while trying %lu%s%s",
                  (unsigned long)baudrate,
                  reason != NULL && reason[0] != '\0' ? " for " : "",
                  reason != NULL && reason[0] != '\0' ? reason : "");
