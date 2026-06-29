@@ -9,7 +9,7 @@
     "category": "Field",
     "icon": "MAP",
     "status": "stable",
-    "minFirmware": "0.1.33",
+    "minFirmware": "0.1.34",
     "releaseNotes": "Adds a separate wardrive package for GPS-stamped Wi-Fi survey points."
   },
   "storage": {

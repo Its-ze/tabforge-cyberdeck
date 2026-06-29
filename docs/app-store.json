@@ -123,12 +123,12 @@
                      "category":  "Field",
                      "icon":  "ROAD",
                      "status":  "stable",
-                     "minFirmware":  "0.1.33",
+                     "minFirmware":  "0.1.34",
                      "releaseNotes":  "Adds the native Road Scout page, GPS source selector, sensor probe, and SD point logger.",
                      "actionCount":  4,
                      "packageUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/road-scout-tab.json",
                      "installedPath":  "/tabforge/apps/road-scout-tab.json",
-                     "sha256":  "4eba2a17e60c39b16d18f78e759937ba82035f7680d40ae1dda9108c87d37081",
+                     "sha256":  "2ec32882b532b79b5360fb6d552ea32a076d64a961034ed0e2058ca255286d8e",
                      "size":  1247
                  },
                  {
@@ -174,12 +174,12 @@
                      "category":  "Field",
                      "icon":  "MAP",
                      "status":  "stable",
-                     "minFirmware":  "0.1.33",
+                     "minFirmware":  "0.1.34",
                      "releaseNotes":  "Adds a separate wardrive package for GPS-stamped Wi-Fi survey points.",
                      "actionCount":  3,
                      "packageUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/wardrive.json",
                      "installedPath":  "/tabforge/apps/wardrive.json",
-                     "sha256":  "058185fcdbe324891434b64146afc5a431c3401ebcc01f54749ce550e217431e",
+                     "sha256":  "1546872d8ac1cb746009f3b71de9bce176ba3d65b68b4e1cfb7a597a6d8db33a",
                      "size":  1029
                  }
              ]

@@ -9,7 +9,7 @@
     "category": "Field",
     "icon": "ROAD",
     "status": "stable",
-    "minFirmware": "0.1.33",
+    "minFirmware": "0.1.34",
     "releaseNotes": "Adds the native Road Scout page, GPS source selector, sensor probe, and SD point logger."
   },
   "storage": {

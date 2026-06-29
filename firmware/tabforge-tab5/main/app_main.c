@@ -115,6 +115,8 @@
 #define MIC_SAMPLE_RATE 16000
 #define MIC_SAMPLES 512
 #define USB_CDC_BAUDRATE 115200
+#define USB_CDC_GPS_BAUDRATE 9600
+#define USB_CDC_GPS_PROBE_MS 4500
 #define USB_CDC_SCAN_TIMEOUT_MS 2500
 #define TABFORGE_EXT5V_EN IO_EXPANDER_PIN_NUM_2
 #define TABFORGE_CHARGE_ENABLE IO_EXPANDER_PIN_NUM_7
@@ -632,8 +634,11 @@ static uint32_t g_usb_tx_packets;
 static uint32_t g_usb_tx_bytes;
 static uint64_t g_usb_last_rx_ms;
 static uint64_t g_usb_last_tx_ms;
+static uint64_t g_usb_cdc_open_ms;
+static uint32_t g_usb_cdc_baudrate;
 static cdc_acm_dev_hdl_t g_usb_cdc_handle;
 static bool g_usb_cdc_disconnected;
+static bool g_usb_cdc_baud_fallback_done;
 static sdr_state_t g_sdr_state = SDR_STATE_OFF;
 static esp_err_t g_sdr_last_error = ESP_OK;
 static bool g_sdr_scan_requested = true;
@@ -8945,6 +8950,31 @@ static void usb_cdc_event_cb(const cdc_acm_host_dev_event_data_t *event, void *u
     }
 }
 
+static void usb_cdc_set_baudrate(uint32_t baudrate, const char *reason)
+{
+    if (g_usb_cdc_handle == NULL || baudrate == 0U) {
+        return;
+    }
+
+    const cdc_acm_line_coding_t line_coding = {
+        .dwDTERate = baudrate,
+        .bCharFormat = 0,
+        .bParityType = 0,
+        .bDataBits = 8,
+    };
+    esp_err_t err = cdc_acm_host_line_coding_set(g_usb_cdc_handle, &line_coding);
+    if (err == ESP_OK) {
+        g_usb_cdc_baudrate = baudrate;
+        ESP_LOGI(TABFORGE_TAG, "USB CDC baud set to %lu%s%s",
+                 (unsigned long)baudrate,
+                 reason != NULL && reason[0] != '\0' ? " for " : "",
+                 reason != NULL && reason[0] != '\0' ? reason : "");
+    } else {
+        g_usb_last_error = err;
+        ESP_LOGW(TABFORGE_TAG, "USB CDC baud set failed: %s", esp_err_to_name(err));
+    }
+}
+
 static bool sdr_is_rtl_device(uint16_t vid, uint16_t pid)
 {
     if (vid == 0x0bda) {
@@ -9285,13 +9315,6 @@ static void usb_cdc_task(void *arg)
         return;
     }
 
-    const cdc_acm_line_coding_t line_coding = {
-        .dwDTERate = USB_CDC_BAUDRATE,
-        .bCharFormat = 0,
-        .bParityType = 0,
-        .bDataBits = 8,
-    };
-
     while (true) {
         if (!g_usb_power_ready) {
             if (g_usb_cdc_handle != NULL) {
@@ -9309,6 +9332,19 @@ static void usb_cdc_task(void *arg)
                 g_usb_cdc_handle = NULL;
                 g_usb_cdc_disconnected = false;
                 g_usb_state = USB_STATE_SCANNING;
+                g_usb_cdc_baudrate = 0;
+                g_usb_cdc_open_ms = 0;
+                g_usb_cdc_baud_fallback_done = false;
+            }
+            uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+            if (!g_usb_cdc_baud_fallback_done &&
+                !g_usb_gps_seen &&
+                g_usb_cdc_baudrate == USB_CDC_GPS_BAUDRATE &&
+                g_usb_cdc_open_ms > 0 &&
+                now_ms - g_usb_cdc_open_ms > USB_CDC_GPS_PROBE_MS) {
+                usb_cdc_set_baudrate(USB_CDC_BAUDRATE, "mesh fallback");
+                g_usb_cdc_baud_fallback_done = true;
+                announce_module_attached("USB serial fallback", "No GPS NMEA seen; switched to 115200.", "usb_cdc_baud_fallback");
             }
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
@@ -9329,12 +9365,14 @@ static void usb_cdc_task(void *arg)
             g_usb_state = USB_STATE_OPEN;
             g_usb_last_error = ESP_OK;
             g_usb_open_count++;
-            cdc_acm_host_line_coding_set(g_usb_cdc_handle, &line_coding);
+            g_usb_cdc_open_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+            g_usb_cdc_baud_fallback_done = false;
+            usb_cdc_set_baudrate(USB_CDC_GPS_BAUDRATE, "GPS NMEA probe");
             cdc_acm_host_set_control_line_state(g_usb_cdc_handle, true, true);
             cdc_acm_host_desc_print(g_usb_cdc_handle);
             append_event("usb_cdc_open");
-            announce_module_attached("USB serial attached", "CDC module opened at 115200.", "usb_cdc_detected");
-            ESP_LOGI(TABFORGE_TAG, "USB CDC device opened at %u baud", (unsigned)USB_CDC_BAUDRATE);
+            announce_module_attached("USB serial attached", "CDC opened at 9600 for GPS probe.", "usb_cdc_detected");
+            ESP_LOGI(TABFORGE_TAG, "USB CDC device opened at %lu baud", (unsigned long)g_usb_cdc_baudrate);
         } else {
             g_usb_last_error = err;
             if (err != ESP_ERR_NOT_FOUND && err != ESP_ERR_TIMEOUT) {
