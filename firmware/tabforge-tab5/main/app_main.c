@@ -85,12 +85,22 @@
 #ifndef LV_SYMBOL_POWER
 #define LV_SYMBOL_POWER "[PWR]"
 #endif
+#ifndef LV_SYMBOL_GPS
+#define LV_SYMBOL_GPS "[GPS]"
+#endif
+#ifndef LV_SYMBOL_MAP
+#define LV_SYMBOL_MAP "[MAP]"
+#endif
+#ifndef LV_SYMBOL_DIRECTORY
+#define LV_SYMBOL_DIRECTORY "[DIR]"
+#endif
 
 #define TABFORGE_TAG "TabForge"
 #define TABFORGE_SD_ROOT BSP_SD_MOUNT_POINT
 #define TABFORGE_CONFIG_PATH TABFORGE_SD_ROOT "/tabforge/config.json"
 #define TABFORGE_EVENT_LOG_PATH TABFORGE_SD_ROOT "/tabforge/logs/events.jsonl"
 #define TABFORGE_MESH_LOG_PATH TABFORGE_SD_ROOT "/tabforge/mesh/messages.jsonl"
+#define TABFORGE_ROADSCOUT_LOG_PATH TABFORGE_SD_ROOT "/tabforge/roadscout/points.jsonl"
 #define TABFORGE_MANIFEST_URL "https://its-ze.github.io/tabforge-cyberdeck/manifest.json"
 #define TABFORGE_APP_STORE_URL "https://its-ze.github.io/tabforge-cyberdeck/app-store.json"
 #define TABFORGE_APP_STORE_PATH TABFORGE_SD_ROOT "/tabforge/apps/store.json"
@@ -177,6 +187,13 @@
 #define TABFORGE_COMPANION_NAME_LEN 48
 #define TABFORGE_COMPANION_SOURCE_LEN 32
 #define TABFORGE_COMPANION_TIME_LEN 48
+#define TABFORGE_GPS_LINE_LEN 128
+#define TABFORGE_GPS_SOURCE_LEN 20
+#define TABFORGE_MODULE_POPUP_TITLE_LEN 48
+#define TABFORGE_MODULE_POPUP_DETAIL_LEN 128
+#define TABFORGE_MODULE_POPUP_MS 4500
+#define TABFORGE_ROADSCOUT_STATUS_LEN 128
+#define TABFORGE_ROADSCOUT_LINE_LEN 256
 #define MESHTASTIC_STREAM_START1 0x94
 #define MESHTASTIC_STREAM_START2 0xC3
 #define MESHTASTIC_MAX_PROTO_LEN 512
@@ -196,12 +213,15 @@ typedef enum {
     APP_NONE,
     APP_WIFI,
     APP_MESSAGES,
+    APP_MESHTASTIC,
     APP_MESHCORE,
     APP_TDECK,
     APP_IR,
     APP_RECORDER,
     APP_USB,
     APP_SDR,
+    APP_ROADSCOUT,
+    APP_WARDRIVE,
     APP_CARDPUTER,
     APP_FILES,
     APP_STORE,
@@ -280,6 +300,12 @@ typedef enum {
     NAV_PAGE_APP,
 } nav_page_t;
 
+typedef enum {
+    GPS_SOURCE_AUTO,
+    GPS_SOURCE_COMPANION,
+    GPS_SOURCE_USB,
+} gps_source_t;
+
 typedef struct {
     const char *label;
     uint32_t seconds;
@@ -321,6 +347,9 @@ typedef struct {
     lv_obj_t *rotation_label;
     lv_obj_t *activity_title_label;
     lv_obj_t *activity_detail_label;
+    lv_obj_t *module_popup;
+    lv_obj_t *module_popup_title_label;
+    lv_obj_t *module_popup_detail_label;
     lv_obj_t *home_wifi_label;
     lv_obj_t *home_accessory_label;
     lv_obj_t *dock_mode_label;
@@ -416,6 +445,18 @@ typedef struct {
 } cardputer_line_state_t;
 
 typedef struct {
+    char line[TABFORGE_GPS_LINE_LEN];
+    size_t length;
+    bool active;
+} gps_line_state_t;
+
+typedef struct {
+    char line[TABFORGE_ROADSCOUT_LINE_LEN];
+    size_t length;
+    bool active;
+} roadscout_line_state_t;
+
+typedef struct {
     bool paired;
     char token[TABFORGE_COMPANION_TOKEN_LEN];
     char phone_name[TABFORGE_COMPANION_NAME_LEN];
@@ -436,13 +477,16 @@ typedef struct {
 
 static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_WIFI, "Wi-Fi", "Scan, connect, and prepare internet OTA.", "Internet", "tile_wifi", APP_WIFI, FEATURE_ACTIVE, 0x70a7ff},
-    {LV_SYMBOL_ENVELOPE, "Messages", "Meshtastic C6L channel text and direct sends.", "Grove", "tile_meshtastic", APP_MESSAGES, FEATURE_ACTIVE, 0x43d17a},
+    {LV_SYMBOL_ENVELOPE, "Mesh Chats", "Channel chat view, saved nodes, voice drafts, and test sends.", "Chats", "tile_messages", APP_MESSAGES, FEATURE_ACTIVE, 0x43d17a},
+    {LV_SYMBOL_GPS, "Meshtastic", "Meshtastic serial API, C6L bridge, channels, GPS, and node messages.", "LoRa", "tile_meshtastic", APP_MESHTASTIC, FEATURE_ACTIVE, 0x6ee7a2},
     {LV_SYMBOL_SHUFFLE, "MeshCore", "Switchable command profile for MeshCore console work.", "Profile", "tile_meshcore", APP_MESHCORE, FEATURE_ACTIVE, 0x61d5f0},
     {LV_SYMBOL_KEYBOARD, "T-Deck", "Companion bridge for the LilyGO T-Deck/Z-Deck flow.", "Bridge", "tile_tdeck", APP_TDECK, FEATURE_ACTIVE, 0xf0bf4f},
     {LV_SYMBOL_EYE_OPEN, "IR Lab", "Learn, label, replay, and store IR macros on SD.", "38 kHz", "tile_ir", APP_IR, FEATURE_ACTIVE, 0xff7a66},
     {LV_SYMBOL_AUDIO, "Recorder", "Live mic level now, push-to-record WAV flow next.", "Live", "tile_mic", APP_RECORDER, FEATURE_ACTIVE, 0xb982ff},
     {LV_SYMBOL_USB, "USB Bay", "Host-side CDC serial workbench for add-ons.", "Host", "tile_usb", APP_USB, FEATURE_ACTIVE, 0x70a7ff},
     {LV_SYMBOL_TUNING, "SDR", "RTL-SDR USB receiver detection and field presets.", "RTL", "tile_sdr", APP_SDR, FEATURE_ACTIVE, 0x69d2e7},
+    {LV_SYMBOL_MAP, "Road Scout", "On-device RoadLens field app with phone or USB GPS and sensor control.", "Scout", "tile_roadscout", APP_ROADSCOUT, FEATURE_ACTIVE, 0xffc857},
+    {LV_SYMBOL_DIRECTORY, "Wardrive", "GPS-stamped Wi-Fi survey logging using Tab scans and attached GPS.", "Survey", "tile_wardrive", APP_WARDRIVE, FEATURE_ACTIVE, 0x77dd88},
     {LV_SYMBOL_KEYBOARD, "Cardputer", "Grove or USB-C keyboard controller for TabForge text entry.", "Keys", "tile_cardputer", APP_CARDPUTER, FEATURE_ACTIVE, 0xf0bf4f},
     {LV_SYMBOL_SD_CARD, "Files", "Runtime config, event journal, audio, and backups.", "SD", "tile_sd", APP_FILES, FEATURE_ACTIVE, 0x77dd88},
     {LV_SYMBOL_DOWNLOAD, "Store", "GitHub app catalog with SD-installed mini apps.", "Apps", "tile_store", APP_STORE, FEATURE_ACTIVE, 0x5ec8ff},
@@ -550,6 +594,10 @@ static app_id_t g_active_app = APP_NONE;
 static volatile bool g_active_app_refresh_requested;
 static bool g_preserve_activity_on_app_render;
 static uint32_t g_heartbeat_count;
+static char g_module_popup_title[TABFORGE_MODULE_POPUP_TITLE_LEN] = "";
+static char g_module_popup_detail[TABFORGE_MODULE_POPUP_DETAIL_LEN] = "";
+static uint64_t g_module_popup_until_ms;
+static bool g_module_popup_dirty;
 static bool g_ext_power_ready;
 static esp_err_t g_ext_power_error = ESP_OK;
 static bool g_usb_power_ready;
@@ -626,6 +674,35 @@ static bool g_cardputer_pending_command_ready;
 static lv_obj_t *g_cardputer_focus_textarea;
 static cardputer_line_state_t g_cardputer_usb_line;
 static cardputer_line_state_t g_cardputer_grove_line;
+static gps_line_state_t g_usb_gps_line;
+static gps_line_state_t g_grove_gps_line;
+static bool g_usb_gps_seen;
+static bool g_usb_gps_fix_ready;
+static uint32_t g_usb_gps_sentence_count;
+static uint32_t g_usb_gps_fix_count;
+static uint32_t g_usb_gps_parse_errors;
+static uint64_t g_usb_gps_last_ms;
+static double g_usb_gps_latitude;
+static double g_usb_gps_longitude;
+static double g_usb_gps_altitude_m;
+static double g_usb_gps_accuracy_m;
+static char g_usb_gps_time[16] = "--";
+static char g_usb_gps_source[TABFORGE_GPS_SOURCE_LEN] = "none";
+static gps_source_t g_roadscout_gps_source = GPS_SOURCE_AUTO;
+static roadscout_line_state_t g_roadscout_usb_line;
+static roadscout_line_state_t g_roadscout_grove_line;
+static bool g_roadscout_sensor_seen;
+static bool g_roadscout_sniffer_active;
+static uint32_t g_roadscout_probe_count;
+static uint32_t g_roadscout_start_count;
+static uint32_t g_roadscout_log_count;
+static uint32_t g_roadscout_detection_count;
+static uint32_t g_roadscout_signature_count;
+static uint32_t g_roadscout_frames_seen;
+static char g_roadscout_status[TABFORGE_ROADSCOUT_STATUS_LEN] = "Use phone GPS or USB GPS; attach a RoadLens ESP32 sensor for passive Wi-Fi sweeping.";
+static char g_roadscout_last_detection[TABFORGE_ROADSCOUT_STATUS_LEN] = "No RoadLens detections yet.";
+static uint32_t g_wardrive_log_count;
+static char g_wardrive_status[TABFORGE_ROADSCOUT_STATUS_LEN] = "Run a Wi-Fi scan, then log the selected AP with active GPS.";
 static i2c_master_dev_handle_t g_battery_monitor;
 static bool g_battery_online;
 static esp_err_t g_battery_last_error = ESP_ERR_NOT_FOUND;
@@ -685,8 +762,11 @@ static bool usb_cdc_send_bytes(const uint8_t *data, size_t data_len, const char 
 static void request_active_app_refresh(void);
 static int compare_versions(const char *left, const char *right);
 static void sdr_request_scan(const char *reason);
+static void append_event(const char *event);
 static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, size_t data_len);
 static bool cardputer_keyboard_present(void);
+static bool gps_stream_ingest(const char *source, const uint8_t *data, size_t data_len);
+static bool roadscout_sensor_ingest(const char *source, const uint8_t *data, size_t data_len);
 static void apply_cardputer_pending_command_locked(void);
 static void apply_cardputer_pending_input_locked(void);
 static const feature_tile_t *find_tile_by_app(app_id_t app_id);
@@ -1076,6 +1156,163 @@ static void format_battery_status(char *buffer, size_t buffer_size, bool compact
                  g_battery_mv / 1000,
                  (g_battery_mv % 1000) / 10);
     }
+}
+
+static void announce_module_attached(const char *title, const char *detail, const char *event_name)
+{
+    if (title == NULL || title[0] == '\0') {
+        return;
+    }
+
+    strlcpy(g_module_popup_title, title, sizeof(g_module_popup_title));
+    strlcpy(g_module_popup_detail, detail != NULL ? detail : "", sizeof(g_module_popup_detail));
+    g_module_popup_until_ms = (uint64_t)now_ms_u32() + TABFORGE_MODULE_POPUP_MS;
+    g_module_popup_dirty = true;
+    if (event_name != NULL && event_name[0] != '\0') {
+        append_event(event_name);
+    }
+    request_active_app_refresh();
+}
+
+static void refresh_module_popup_locked(void)
+{
+    if (g_ui.module_popup == NULL) {
+        return;
+    }
+
+    uint64_t now_ms = now_ms_u32();
+    if (g_module_popup_until_ms == 0 || now_ms > g_module_popup_until_ms) {
+        lv_obj_add_flag(g_ui.module_popup, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    if (g_ui.module_popup_title_label != NULL && g_module_popup_dirty) {
+        lv_label_set_text(g_ui.module_popup_title_label, g_module_popup_title);
+    }
+    if (g_ui.module_popup_detail_label != NULL && g_module_popup_dirty) {
+        lv_label_set_text(g_ui.module_popup_detail_label, g_module_popup_detail);
+    }
+    g_module_popup_dirty = false;
+    lv_obj_clear_flag(g_ui.module_popup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_ui.module_popup);
+}
+
+static const char *gps_source_setting_name(gps_source_t source)
+{
+    switch (source) {
+    case GPS_SOURCE_COMPANION:
+        return "Phone";
+    case GPS_SOURCE_USB:
+        return "USB GPS";
+    case GPS_SOURCE_AUTO:
+    default:
+        return "Auto";
+    }
+}
+
+static bool usb_gps_recent(void)
+{
+    if (!g_usb_gps_fix_ready) {
+        return false;
+    }
+    uint64_t now_ms = now_ms_u32();
+    return g_usb_gps_last_ms == 0 || now_ms - g_usb_gps_last_ms < 30000ULL;
+}
+
+static bool companion_gps_recent(void)
+{
+    if (!g_companion.location_ready) {
+        return false;
+    }
+    uint64_t now_ms = now_ms_u32();
+    return g_companion.location_updated_ms == 0 || now_ms - g_companion.location_updated_ms < 60000ULL;
+}
+
+static bool get_selected_gps_fix(gps_source_t setting,
+                                 double *lat,
+                                 double *lon,
+                                 double *alt,
+                                 double *accuracy,
+                                 char *source,
+                                 size_t source_size)
+{
+    bool use_usb = false;
+    bool use_phone = false;
+
+    if (setting == GPS_SOURCE_USB) {
+        use_usb = usb_gps_recent();
+    } else if (setting == GPS_SOURCE_COMPANION) {
+        use_phone = companion_gps_recent();
+    } else {
+        use_usb = usb_gps_recent();
+        use_phone = !use_usb && companion_gps_recent();
+    }
+
+    if (use_usb) {
+        if (lat != NULL) *lat = g_usb_gps_latitude;
+        if (lon != NULL) *lon = g_usb_gps_longitude;
+        if (alt != NULL) *alt = g_usb_gps_altitude_m;
+        if (accuracy != NULL) *accuracy = g_usb_gps_accuracy_m;
+        if (source != NULL && source_size > 0) {
+            strlcpy(source, g_usb_gps_source[0] != '\0' ? g_usb_gps_source : "usb-gps", source_size);
+        }
+        return true;
+    }
+
+    if (use_phone) {
+        if (lat != NULL) *lat = g_companion.latitude;
+        if (lon != NULL) *lon = g_companion.longitude;
+        if (alt != NULL) *alt = g_companion.altitude_m;
+        if (accuracy != NULL) *accuracy = g_companion.accuracy_m;
+        if (source != NULL && source_size > 0) {
+            strlcpy(source, g_companion.source[0] != '\0' ? g_companion.source : "phone", source_size);
+        }
+        return true;
+    }
+
+    if (source != NULL && source_size > 0) {
+        strlcpy(source, "none", source_size);
+    }
+    return false;
+}
+
+static void format_gps_status(char *buffer, size_t buffer_size)
+{
+    char source[TABFORGE_GPS_SOURCE_LEN];
+    double lat = 0.0;
+    double lon = 0.0;
+    double alt = 0.0;
+    double acc = 0.0;
+    bool ready = get_selected_gps_fix(g_roadscout_gps_source, &lat, &lon, &alt, &acc, source, sizeof(source));
+    if (ready) {
+        snprintf(buffer,
+                 buffer_size,
+                 "%s %.5f %.5f",
+                 source,
+                 lat,
+                 lon);
+        return;
+    }
+
+    snprintf(buffer,
+             buffer_size,
+             "%s | phone %s | usb %s",
+             gps_source_setting_name(g_roadscout_gps_source),
+             companion_gps_recent() ? "ready" : "off",
+             usb_gps_recent() ? "ready" : (g_usb_gps_seen ? "seen" : "off"));
+}
+
+static void format_module_summary(char *buffer, size_t buffer_size)
+{
+    char gps[48];
+    format_gps_status(gps, sizeof(gps));
+    snprintf(buffer,
+             buffer_size,
+             "Mesh %s | GPS %.28s | SDR %s | KBD %s",
+             g_mesh_module_ready ? g_mesh_last_transport : (g_grove_uart_ready ? "grove ready" : "off"),
+             gps,
+             sdr_state_text(),
+             cardputer_keyboard_present() ? g_cardputer_last_source : "touch");
 }
 
 static esp_err_t set_expander_output(esp_io_expander_handle_t expander, uint32_t pin, bool level)
