@@ -5947,9 +5947,9 @@ static void roadscout_probe_button_event_cb(lv_event_t *event)
     if (!sent) {
         sent = roadscout_send_sensor_command("ping", "roadscout ping");
     }
-    snprintf(g_roadscout_status,
-             sizeof(g_roadscout_status),
-             sent ? "Sent RoadLens sensor status probe." : "No USB CDC or Grove serial sensor transport is ready.");
+    strlcpy(g_roadscout_status,
+            sent ? "Sent RoadLens sensor status probe." : "No USB CDC or Grove serial sensor transport is ready.",
+            sizeof(g_roadscout_status));
     set_activity("Road Scout", g_roadscout_status);
     append_event(sent ? "roadscout_probe_sent" : "roadscout_probe_failed");
     request_active_app_refresh();
@@ -8391,7 +8391,7 @@ static void build_module_popup(lv_obj_t *screen, lv_coord_t screen_w)
     lv_obj_add_flag(g_ui.module_popup, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_shadow_width(g_ui.module_popup, 12, 0);
     lv_obj_set_style_shadow_color(g_ui.module_popup, color_hex(0x000000), 0);
-    lv_obj_set_style_shadow_opa(g_ui.module_popup, LV_OPA_40, 0);
+    lv_obj_set_style_shadow_opa(g_ui.module_popup, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(g_ui.module_popup, 10, 0);
     lv_obj_set_flex_flow(g_ui.module_popup, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(g_ui.module_popup, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
