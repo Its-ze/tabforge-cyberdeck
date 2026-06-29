@@ -2568,6 +2568,7 @@ static cardputer_line_state_t *cardputer_line_state_for_source(const char *sourc
 
 static void cardputer_mark_seen(const char *source)
 {
+    bool first_seen = !cardputer_keyboard_present();
     g_cardputer_link_ready = true;
     if (cardputer_source_is_usb(source)) {
         g_cardputer_usb_seen = true;
@@ -2577,6 +2578,9 @@ static void cardputer_mark_seen(const char *source)
     g_cardputer_rx_packets++;
     g_cardputer_last_rx_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
     strlcpy(g_cardputer_last_source, source != NULL ? source : "unknown", sizeof(g_cardputer_last_source));
+    if (first_seen) {
+        announce_module_attached("Cardputer keyboard attached", g_cardputer_last_source, "cardputer_keyboard_detected");
+    }
 }
 
 static void cardputer_queue_text(const char *text)
@@ -5085,6 +5089,7 @@ static esp_err_t companion_location_handler(httpd_req_t *req)
         return companion_send_error(req, "400 Bad Request", "invalid_location", "lat and lon are required.");
     }
 
+    bool first_phone_location = !g_companion.location_ready;
     g_companion.latitude = lat->valuedouble;
     g_companion.longitude = lon->valuedouble;
     cJSON *alt = cJSON_GetObjectItemCaseSensitive(body, "altitude");
@@ -5105,6 +5110,9 @@ static esp_err_t companion_location_handler(httpd_req_t *req)
     g_companion.location_count++;
     g_companion.location_updated_ms = (uint64_t)now_ms_u32();
     append_event("companion_location_updated");
+    if (first_phone_location) {
+        announce_module_attached("Phone GPS active", "Companion location is available.", "phone_gps_detected");
+    }
     update_activity_from_task("Phone GPS", "Location received from companion.");
 
     cJSON_Delete(body);
@@ -6381,6 +6389,35 @@ static void mini_app_run_action(uint8_t index)
         bool ok = roadscout_append_point("wardrive");
         snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.111s", ok ? g_wardrive_status : "No GPS/SD for wardrive log.");
         set_activity("Wardrive Log", g_mini_app_status);
+    } else if (strcmp(action->mode, "meshtastic-open") == 0) {
+        g_meshcore_mode = false;
+        g_active_app = APP_MESHTASTIC;
+        show_nav_page(NAV_PAGE_APP);
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "Opened Meshtastic.");
+        set_activity("Meshtastic", "Native Meshtastic app opened.");
+    } else if (strcmp(action->mode, "meshcore-open") == 0) {
+        g_meshcore_mode = true;
+        g_active_app = APP_MESHCORE;
+        show_nav_page(NAV_PAGE_APP);
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "Opened MeshCore.");
+        set_activity("MeshCore", "Native MeshCore app opened.");
+    } else if (strcmp(action->mode, "meshcore-help") == 0) {
+        g_meshcore_mode = true;
+        refresh_mode_widgets();
+        grove_uart_send_line("help");
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "MeshCore help sent.");
+        set_activity("MeshCore Help", g_grove_uart_ready ? g_mini_app_status : "Grove UART is not ready.");
+    } else if (strcmp(action->mode, "mesh-probe") == 0) {
+        bool api_sent = meshtastic_send_config_request();
+        snprintf(g_mini_app_status,
+                 sizeof(g_mini_app_status),
+                 api_sent ? "Mesh API probe sent." : "No mesh serial transport ready.");
+        set_activity("Mesh Probe", g_mini_app_status);
+    } else if (strcmp(action->mode, "accessories") == 0) {
+        set_accessory_power(true);
+        start_accessory_probe_tasks();
+        snprintf(g_mini_app_status, sizeof(g_mini_app_status), "Accessory rails powered.");
+        set_activity("Accessories On", g_mini_app_status);
     } else if (action->has_ir) {
         esp_err_t err = ir_send_nec_command((uint8_t)(action->command & 0xffU), action->label);
         snprintf(g_mini_app_status,
@@ -7093,9 +7130,9 @@ static lv_obj_t *add_status_pill(lv_obj_t *parent,
     lv_obj_set_style_pad_all(pill, 8, 0);
     lv_obj_set_flex_flow(pill, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(pill, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *title_label = make_text(pill, title, 0x9fb3c0, (width * 42) / 100);
+    lv_obj_t *title_label = make_text(pill, title, 0x9fb3c0, (width * 34) / 100);
     lv_label_set_long_mode(title_label, LV_LABEL_LONG_CLIP);
-    *value_label = make_text(pill, "--", 0xf1f7f3, (width * 52) / 100);
+    *value_label = make_text(pill, "--", 0xf1f7f3, (width * 60) / 100);
     lv_label_set_long_mode(*value_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(*value_label, LV_TEXT_ALIGN_RIGHT, 0);
     return pill;
@@ -7124,7 +7161,7 @@ static void build_quick_status(lv_obj_t *parent, lv_coord_t width, lv_coord_t he
 
     add_status_pill(stat_grid, "Battery", &g_ui.battery_card_label, card_w, card_h, 0xffc857);
     add_status_pill(stat_grid, "Wi-Fi", &g_ui.home_wifi_label, card_w, card_h, 0x70a7ff);
-    add_status_pill(stat_grid, "Add-ons", &g_ui.home_accessory_label, card_w, card_h, 0x43d17a);
+    add_status_pill(stat_grid, "Modules", &g_ui.home_accessory_label, card_w, card_h, 0x43d17a);
     add_status_pill(stat_grid, "SD", &g_ui.sd_label, card_w, card_h, 0xff7a66);
 }
 
@@ -8816,6 +8853,7 @@ static void init_ir_probe(void)
     g_ir_level = gpio_get_level(TABFORGE_IR_RX_GPIO);
     g_ir_probe_ready = true;
     append_event("ir_probe_started");
+    announce_module_attached("IR unit ready", "Grove RX/TX IR probe armed.", "ir_unit_detected");
     ESP_LOGI(TABFORGE_TAG, "IR Grove probe ready on RX GPIO%u TX GPIO%u",
              (unsigned)TABFORGE_IR_RX_GPIO,
              (unsigned)TABFORGE_IR_TX_GPIO);
@@ -8852,6 +8890,7 @@ static void init_grove_uart_probe(void)
     g_grove_uart_ready = (err == ESP_OK);
     if (g_grove_uart_ready) {
         append_event("grove_uart_rx_started");
+        announce_module_attached("Grove UART ready", "4-wire module bus is listening at 115200.", "grove_uart_detected");
         ESP_LOGI(TABFORGE_TAG, "Grove UART ready on RX GPIO%u TX GPIO%u at %u baud",
                  (unsigned)TABFORGE_GROVE_RX_GPIO,
                  (unsigned)TABFORGE_GROVE_TX_GPIO,
@@ -8889,6 +8928,12 @@ static void usb_cdc_event_cb(const cdc_acm_host_dev_event_data_t *event, void *u
         g_usb_cdc_disconnected = true;
         g_usb_disconnect_count++;
         g_usb_state = USB_STATE_DISCONNECTED;
+        if (strcmp(g_usb_gps_source, "USB GPS") == 0) {
+            g_usb_gps_seen = false;
+            g_usb_gps_fix_ready = false;
+            strlcpy(g_usb_gps_source, "none", sizeof(g_usb_gps_source));
+        }
+        announce_module_attached("USB module removed", "CDC device disconnected.", "usb_cdc_disconnected");
         ESP_LOGI(TABFORGE_TAG, "USB CDC device disconnected");
         break;
     case CDC_ACM_HOST_SERIAL_STATE:
@@ -8971,6 +9016,7 @@ static bool sdr_probe_usb_addr(usb_host_client_handle_t client_hdl, uint8_t addr
     bool is_rtl = sdr_is_rtl_device(device_desc->idVendor, device_desc->idProduct);
     if (is_rtl) {
         const usb_config_desc_t *config_desc = NULL;
+        bool first_detect = g_sdr_state != SDR_STATE_RTL_DETECTED;
         g_sdr_addr = addr;
         g_sdr_vid = device_desc->idVendor;
         g_sdr_pid = device_desc->idProduct;
@@ -8993,6 +9039,9 @@ static bool sdr_probe_usb_addr(usb_host_client_handle_t client_hdl, uint8_t addr
                  (unsigned)g_sdr_bulk_out_ep,
                  (unsigned)g_sdr_bulk_out_mps);
         append_event("sdr_rtl_detected");
+        if (first_detect) {
+            announce_module_attached("RTL-SDR attached", g_sdr_status, "rtl_sdr_detected");
+        }
         ESP_LOGI(TABFORGE_TAG, "%s", g_sdr_status);
     } else if (g_sdr_state != SDR_STATE_RTL_DETECTED) {
         g_sdr_vid = device_desc->idVendor;
@@ -9007,6 +9056,7 @@ static bool sdr_probe_usb_addr(usb_host_client_handle_t client_hdl, uint8_t addr
                  (unsigned)g_sdr_vid,
                  (unsigned)g_sdr_pid,
                  (unsigned)g_sdr_addr);
+        announce_module_attached("USB module attached", g_sdr_status, "usb_module_detected");
     }
 
     usb_host_device_close(client_hdl, dev_hdl);
@@ -9071,6 +9121,7 @@ static void sdr_usb_client_event_cb(const usb_host_client_event_msg_t *event_msg
     case USB_HOST_CLIENT_EVENT_NEW_DEV:
         g_sdr_client_event_seen = true;
         g_sdr_scan_requested = true;
+        announce_module_attached("USB device attached", "Descriptor scan queued.", "usb_device_attached");
         break;
     case USB_HOST_CLIENT_EVENT_DEV_GONE:
         g_sdr_client_event_seen = true;
@@ -9079,6 +9130,7 @@ static void sdr_usb_client_event_cb(const usb_host_client_event_msg_t *event_msg
             g_sdr_state = SDR_STATE_NO_DEVICE;
             strlcpy(g_sdr_status, "RTL-SDR disconnected.", sizeof(g_sdr_status));
         }
+        announce_module_attached("USB device removed", "Descriptor scan queued.", "usb_device_removed");
         break;
     default:
         break;
@@ -9281,6 +9333,7 @@ static void usb_cdc_task(void *arg)
             cdc_acm_host_set_control_line_state(g_usb_cdc_handle, true, true);
             cdc_acm_host_desc_print(g_usb_cdc_handle);
             append_event("usb_cdc_open");
+            announce_module_attached("USB serial attached", "CDC module opened at 115200.", "usb_cdc_detected");
             ESP_LOGI(TABFORGE_TAG, "USB CDC device opened at %u baud", (unsigned)USB_CDC_BAUDRATE);
         } else {
             g_usb_last_error = err;

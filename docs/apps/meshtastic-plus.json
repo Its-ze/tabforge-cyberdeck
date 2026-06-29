@@ -1,0 +1,60 @@
+{
+  "schema": "tabforge.mini-app.v1",
+  "id": "meshtastic-plus",
+  "name": "Meshtastic Plus",
+  "version": "0.1.0",
+  "surface": "tab5",
+  "summary": "Dedicated Meshtastic app launcher actions for channels, saved nodes, GPS sharing, voice drafts, and all-device tests.",
+  "store": {
+    "category": "Mesh",
+    "icon": "MESH",
+    "status": "stable",
+    "minFirmware": "0.1.33",
+    "releaseNotes": "Adds a separate Meshtastic package that opens the native Meshtastic page and keeps MeshCore split out."
+  },
+  "storage": {
+    "root": "/tabforge/apps/meshtastic-plus",
+    "writes": [
+      "/tabforge/mesh/messages.jsonl",
+      "/tabforge/apps/meshtastic-plus/state.json"
+    ]
+  },
+  "permissions": {
+    "meshText": true,
+    "meshChannels": true,
+    "gpsOptional": true,
+    "micVoiceDrafts": true,
+    "nativeCode": false
+  },
+  "actions": [
+    {
+      "id": "open-meshtastic",
+      "label": "Open Mesh",
+      "mode": "meshtastic-open"
+    },
+    {
+      "id": "all-devices-test",
+      "label": "Test All",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "text": "TabForge Meshtastic test: all devices reply."
+      }
+    },
+    {
+      "id": "share-location",
+      "label": "Share GPS",
+      "frame": {
+        "tabforge": "mesh.text",
+        "to": "^all",
+        "gps": true,
+        "text": "Sharing current TabForge location."
+      }
+    },
+    {
+      "id": "voice-draft",
+      "label": "Voice Draft",
+      "mode": "mic-level-summary"
+    }
+  ]
+}

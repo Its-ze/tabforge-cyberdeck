@@ -1,0 +1,44 @@
+{
+  "schema": "tabforge.mini-app.v1",
+  "id": "wardrive",
+  "name": "Wardrive",
+  "version": "0.1.0",
+  "surface": "tab5",
+  "summary": "Passive Wi-Fi survey logger that pairs Tab Wi-Fi scans with companion or attached USB GPS and stores points on SD.",
+  "store": {
+    "category": "Field",
+    "icon": "MAP",
+    "status": "stable",
+    "minFirmware": "0.1.33",
+    "releaseNotes": "Adds a separate wardrive package for GPS-stamped Wi-Fi survey points."
+  },
+  "storage": {
+    "root": "/tabforge/apps/wardrive",
+    "writes": [
+      "/tabforge/roadscout/points.jsonl",
+      "/tabforge/apps/wardrive/state.json"
+    ]
+  },
+  "permissions": {
+    "gpsOptional": true,
+    "wifiScan": true,
+    "nativeCode": false
+  },
+  "actions": [
+    {
+      "id": "open-wardrive",
+      "label": "Open",
+      "mode": "wardrive-open"
+    },
+    {
+      "id": "scan-wifi",
+      "label": "Scan Wi-Fi",
+      "mode": "wardrive-scan"
+    },
+    {
+      "id": "log-point",
+      "label": "Log Point",
+      "mode": "wardrive-log"
+    }
+  ]
+}

@@ -2,7 +2,7 @@
     "schema":  "tabforge.app-store.v1",
     "project":  "tabforge-cyberdeck",
     "channel":  "stable",
-    "updated":  "2026-06-28",
+    "updated":  "2026-06-29",
     "libraryUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/",
     "notes":  "Data-driven TabForge mini-app packages. Packages are JSON only, SHA256-checked, and do not contain native executable code.",
     "updatePolicy":  {
@@ -64,6 +64,23 @@
                      "size":  1197
                  },
                  {
+                     "id":  "meshcore-tools",
+                     "name":  "MeshCore Tools",
+                     "summary":  "Dedicated MeshCore app actions for opening the MeshCore profile, sending help, probing mesh transport, and checking accessories.",
+                     "version":  "0.1.0",
+                     "surface":  "tab5",
+                     "category":  "Mesh",
+                     "icon":  "CORE",
+                     "status":  "stable",
+                     "minFirmware":  "0.1.33",
+                     "releaseNotes":  "Splits MeshCore into its own package with native MeshCore app shortcuts.",
+                     "actionCount":  4,
+                     "packageUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/meshcore-tools.json",
+                     "installedPath":  "/tabforge/apps/meshcore-tools.json",
+                     "sha256":  "d5f7111f68272e4fbce251a32a6fa234be390b63046463774959918345dfd63d",
+                     "size":  1187
+                 },
+                 {
                      "id":  "mesh-plus",
                      "name":  "Mesh Plus",
                      "summary":  "Channel-aware mesh messenger actions, GPS-optional status sends, and saved-node friendly defaults.",
@@ -79,6 +96,40 @@
                      "installedPath":  "/tabforge/apps/mesh-plus.json",
                      "sha256":  "6444d818da41531b9002a3ec1b7cd6d2229a42ed76846f2206f3066b5cf47638",
                      "size":  1375
+                 },
+                 {
+                     "id":  "meshtastic-plus",
+                     "name":  "Meshtastic Plus",
+                     "summary":  "Dedicated Meshtastic app launcher actions for channels, saved nodes, GPS sharing, voice drafts, and all-device tests.",
+                     "version":  "0.1.0",
+                     "surface":  "tab5",
+                     "category":  "Mesh",
+                     "icon":  "MESH",
+                     "status":  "stable",
+                     "minFirmware":  "0.1.33",
+                     "releaseNotes":  "Adds a separate Meshtastic package that opens the native Meshtastic page and keeps MeshCore split out.",
+                     "actionCount":  4,
+                     "packageUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/meshtastic-plus.json",
+                     "installedPath":  "/tabforge/apps/meshtastic-plus.json",
+                     "sha256":  "5ae8de2ba710aa8cad5db25a7acb1f5702634987ffdb85ef49e6043a78aef2ec",
+                     "size":  1505
+                 },
+                 {
+                     "id":  "road-scout-tab",
+                     "name":  "Road Scout Tab",
+                     "summary":  "On-device RoadLens field console with phone-or-USB GPS selection, RoadLens sensor probe, passive sweep request, and SD point logging.",
+                     "version":  "0.1.0",
+                     "surface":  "tab5",
+                     "category":  "Field",
+                     "icon":  "ROAD",
+                     "status":  "stable",
+                     "minFirmware":  "0.1.33",
+                     "releaseNotes":  "Adds the native Road Scout page, GPS source selector, sensor probe, and SD point logger.",
+                     "actionCount":  4,
+                     "packageUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/road-scout-tab.json",
+                     "installedPath":  "/tabforge/apps/road-scout-tab.json",
+                     "sha256":  "4eba2a17e60c39b16d18f78e759937ba82035f7680d40ae1dda9108c87d37081",
+                     "size":  1247
                  },
                  {
                      "id":  "rtl-sdr",
@@ -113,6 +164,23 @@
                      "installedPath":  "/tabforge/apps/voice-notes.json",
                      "sha256":  "b2f616075784a2e66f6796c20ec7e03fc10b4889ceaae6754deb97023171f710",
                      "size":  990
+                 },
+                 {
+                     "id":  "wardrive",
+                     "name":  "Wardrive",
+                     "summary":  "Passive Wi-Fi survey logger that pairs Tab Wi-Fi scans with companion or attached USB GPS and stores points on SD.",
+                     "version":  "0.1.0",
+                     "surface":  "tab5",
+                     "category":  "Field",
+                     "icon":  "MAP",
+                     "status":  "stable",
+                     "minFirmware":  "0.1.33",
+                     "releaseNotes":  "Adds a separate wardrive package for GPS-stamped Wi-Fi survey points.",
+                     "actionCount":  3,
+                     "packageUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/wardrive.json",
+                     "installedPath":  "/tabforge/apps/wardrive.json",
+                     "sha256":  "058185fcdbe324891434b64146afc5a431c3401ebcc01f54749ce550e217431e",
+                     "size":  1029
                  }
              ]
 }

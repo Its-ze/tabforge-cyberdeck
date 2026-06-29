@@ -1,0 +1,50 @@
+{
+  "schema": "tabforge.mini-app.v1",
+  "id": "meshcore-tools",
+  "name": "MeshCore Tools",
+  "version": "0.1.0",
+  "surface": "tab5",
+  "summary": "Dedicated MeshCore app actions for opening the MeshCore profile, sending help, probing mesh transport, and checking accessories.",
+  "store": {
+    "category": "Mesh",
+    "icon": "CORE",
+    "status": "stable",
+    "minFirmware": "0.1.33",
+    "releaseNotes": "Splits MeshCore into its own package with native MeshCore app shortcuts."
+  },
+  "storage": {
+    "root": "/tabforge/apps/meshcore-tools",
+    "writes": [
+      "/tabforge/logs/events.jsonl",
+      "/tabforge/apps/meshcore-tools/state.json"
+    ]
+  },
+  "permissions": {
+    "meshText": true,
+    "meshChannels": true,
+    "serialBridge": true,
+    "nativeCode": false
+  },
+  "actions": [
+    {
+      "id": "open-meshcore",
+      "label": "Open Core",
+      "mode": "meshcore-open"
+    },
+    {
+      "id": "core-help",
+      "label": "Core Help",
+      "mode": "meshcore-help"
+    },
+    {
+      "id": "mesh-probe",
+      "label": "Probe",
+      "mode": "mesh-probe"
+    },
+    {
+      "id": "accessories",
+      "label": "Power Bus",
+      "mode": "accessories"
+    }
+  ]
+}

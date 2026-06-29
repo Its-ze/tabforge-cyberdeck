@@ -1,0 +1,51 @@
+{
+  "schema": "tabforge.mini-app.v1",
+  "id": "road-scout-tab",
+  "name": "Road Scout Tab",
+  "version": "0.1.0",
+  "surface": "tab5",
+  "summary": "On-device RoadLens field console with phone-or-USB GPS selection, RoadLens sensor probe, passive sweep request, and SD point logging.",
+  "store": {
+    "category": "Field",
+    "icon": "ROAD",
+    "status": "stable",
+    "minFirmware": "0.1.33",
+    "releaseNotes": "Adds the native Road Scout page, GPS source selector, sensor probe, and SD point logger."
+  },
+  "storage": {
+    "root": "/tabforge/apps/road-scout-tab",
+    "writes": [
+      "/tabforge/roadscout/points.jsonl",
+      "/tabforge/apps/road-scout-tab/state.json"
+    ]
+  },
+  "permissions": {
+    "gpsOptional": true,
+    "usbHost": true,
+    "serialBridge": true,
+    "wifiScan": true,
+    "nativeCode": false
+  },
+  "actions": [
+    {
+      "id": "open-road-scout",
+      "label": "Open Scout",
+      "mode": "roadscout-open"
+    },
+    {
+      "id": "gps-source",
+      "label": "GPS Source",
+      "mode": "roadscout-gps"
+    },
+    {
+      "id": "sensor-probe",
+      "label": "Probe",
+      "mode": "roadscout-probe"
+    },
+    {
+      "id": "log-point",
+      "label": "Log Point",
+      "mode": "roadscout-log"
+    }
+  ]
+}
