@@ -184,6 +184,10 @@
 #define TABFORGE_CARDPUTER_COMMAND_LEN 32
 #define TABFORGE_CARDPUTER_APP_LEN 24
 #define TABFORGE_CARDPUTER_ACTION_LEN 40
+#define TABFORGE_CARD_DISPLAY_PAIR_LEN 8
+#define TABFORGE_CARD_DISPLAY_TITLE_LEN 48
+#define TABFORGE_CARD_DISPLAY_BODY_LEN 256
+#define TABFORGE_CARD_DISPLAY_STATUS_LEN 96
 #define TABFORGE_COMPANION_BODY_MAX 1536
 #define TABFORGE_COMPANION_TOKEN_LEN 33
 #define TABFORGE_COMPANION_NAME_LEN 48
@@ -225,6 +229,7 @@ typedef enum {
     APP_ROADSCOUT,
     APP_WARDRIVE,
     APP_CARDPUTER,
+    APP_CARD_DISPLAY,
     APP_FILES,
     APP_STORE,
     APP_UPDATE,
@@ -490,6 +495,7 @@ static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_MAP, "Road Scout", "On-device RoadLens field app with phone or USB GPS and sensor control.", "Scout", "tile_roadscout", APP_ROADSCOUT, FEATURE_ACTIVE, 0xffc857},
     {LV_SYMBOL_DIRECTORY, "Wardrive", "GPS-stamped Wi-Fi survey logging using Tab scans and attached GPS.", "Survey", "tile_wardrive", APP_WARDRIVE, FEATURE_ACTIVE, 0x77dd88},
     {LV_SYMBOL_KEYBOARD, "Cardputer", "Grove or USB-C keyboard controller for TabForge text entry.", "Keys", "tile_cardputer", APP_CARDPUTER, FEATURE_ACTIVE, 0xf0bf4f},
+    {LV_SYMBOL_KEYBOARD, "Card Display", "Use the Tab5 as a paired external display and helper processor for the Cardputer.", "Remote", "tile_card_display", APP_CARD_DISPLAY, FEATURE_ACTIVE, 0x22d3ee},
     {LV_SYMBOL_SD_CARD, "Files", "Runtime config, event journal, audio, and backups.", "SD", "tile_sd", APP_FILES, FEATURE_ACTIVE, 0x77dd88},
     {LV_SYMBOL_DOWNLOAD, "Store", "GitHub app catalog with SD-installed mini apps.", "Apps", "tile_store", APP_STORE, FEATURE_ACTIVE, 0x5ec8ff},
     {LV_SYMBOL_DOWNLOAD, "Update", "Internet OTA package checks and confirm button.", "OTA", "tile_update", APP_UPDATE, FEATURE_ACTIVE, 0xffc857},
@@ -726,6 +732,19 @@ static bool g_cardputer_pending_command_ready;
 static lv_obj_t *g_cardputer_focus_textarea;
 static cardputer_line_state_t g_cardputer_usb_line;
 static cardputer_line_state_t g_cardputer_grove_line;
+static char g_card_display_pair_code[TABFORGE_CARD_DISPLAY_PAIR_LEN] = "";
+static bool g_card_display_paired;
+static uint32_t g_card_display_pair_count;
+static uint32_t g_card_display_pair_failures;
+static uint32_t g_card_display_frame_count;
+static uint32_t g_card_display_wifi_requests;
+static uint32_t g_card_display_processing_requests;
+static uint64_t g_card_display_last_ms;
+static char g_card_display_source[16] = "none";
+static char g_card_display_device[24] = "cardputer";
+static char g_card_display_title[TABFORGE_CARD_DISPLAY_TITLE_LEN] = "Cardputer Remote Display";
+static char g_card_display_body[TABFORGE_CARD_DISPLAY_BODY_LEN] = "Open this app, then pair from the Cardputer Remote Display page.";
+static char g_card_display_status[TABFORGE_CARD_DISPLAY_STATUS_LEN] = "Waiting for Cardputer pairing.";
 static gps_line_state_t g_usb_gps_line;
 static gps_line_state_t g_grove_gps_line;
 static bool g_usb_gps_seen;
@@ -812,8 +831,10 @@ static void grove_uart_send_line(const char *line);
 static bool grove_uart_send_bytes(const uint8_t *data, size_t data_len, const char *label);
 static bool usb_cdc_send_bytes(const uint8_t *data, size_t data_len, const char *label);
 static void request_active_app_refresh(void);
+static void update_activity_from_task(const char *title, const char *detail);
 static int compare_versions(const char *left, const char *right);
 static void sdr_request_scan(const char *reason);
+static void wifi_scan_task(void *arg);
 static void append_event(const char *event);
 static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, size_t data_len);
 static bool cardputer_keyboard_present(void);
@@ -2713,6 +2734,176 @@ static void cardputer_queue_command(const char *source,
     request_active_app_refresh();
 }
 
+static void card_display_generate_pair_code(void)
+{
+    uint32_t value = esp_random() % 10000U;
+    snprintf(g_card_display_pair_code, sizeof(g_card_display_pair_code), "%04lu", (unsigned long)value);
+}
+
+static void card_display_ensure_pair_code(void)
+{
+    if (g_card_display_pair_code[0] == '\0') {
+        card_display_generate_pair_code();
+    }
+}
+
+static void card_display_send_response(const char *source, const char *state, const char *detail)
+{
+    char packet[224];
+    snprintf(packet,
+             sizeof(packet),
+             "{\"tabforge\":\"card.display.ack\",\"state\":\"%.24s\",\"detail\":\"%.96s\",\"code\":\"%.7s\"}\n",
+             state != NULL ? state : "ok",
+             detail != NULL ? detail : "",
+             g_card_display_pair_code);
+
+    if (cardputer_source_is_usb(source)) {
+        (void)usb_cdc_send_bytes((const uint8_t *)packet, strlen(packet), "card display ack");
+    } else {
+        char line[224];
+        strlcpy(line, packet, sizeof(line));
+        size_t len = strlen(line);
+        if (len > 0U && line[len - 1U] == '\n') {
+            line[len - 1U] = '\0';
+        }
+        grove_uart_send_line(line);
+    }
+}
+
+static bool card_display_tabforge_is_remote(const char *tabforge)
+{
+    return tabforge != NULL &&
+           (strcmp(tabforge, "cardputer.remote.pair") == 0 ||
+            strcmp(tabforge, "cardputer.remote.start") == 0 ||
+            strcmp(tabforge, "cardputer.remote.frame") == 0 ||
+            strcmp(tabforge, "cardputer.remote.end") == 0 ||
+            strcmp(tabforge, "cardputer.remote.wifi") == 0 ||
+            strcmp(tabforge, "cardputer.remote.compute") == 0 ||
+            strcmp(tabforge, "cardputer.display.pair") == 0 ||
+            strcmp(tabforge, "cardputer.display.frame") == 0);
+}
+
+static bool card_display_handle_json_line(const char *source, cJSON *root, const char *tabforge)
+{
+    if (!card_display_tabforge_is_remote(tabforge)) {
+        return false;
+    }
+
+    card_display_ensure_pair_code();
+    cardputer_mark_seen(source);
+
+    char code[TABFORGE_CARD_DISPLAY_PAIR_LEN] = "";
+    char title[TABFORGE_CARD_DISPLAY_TITLE_LEN] = "";
+    char body[TABFORGE_CARD_DISPLAY_BODY_LEN] = "";
+    char status[TABFORGE_CARD_DISPLAY_STATUS_LEN] = "";
+    char device[24] = "";
+    char request[32] = "";
+    copy_json_string(root, "code", code, sizeof(code));
+    copy_json_string(root, "title", title, sizeof(title));
+    copy_json_string(root, "body", body, sizeof(body));
+    copy_json_string(root, "status", status, sizeof(status));
+    copy_json_string(root, "device", device, sizeof(device));
+    copy_json_string(root, "request", request, sizeof(request));
+
+    bool is_pair = strcmp(tabforge, "cardputer.remote.pair") == 0 ||
+                   strcmp(tabforge, "cardputer.display.pair") == 0;
+    bool is_end = strcmp(tabforge, "cardputer.remote.end") == 0;
+    if (is_pair) {
+        if (strcmp(code, g_card_display_pair_code) == 0) {
+            g_card_display_paired = true;
+            g_card_display_pair_count++;
+            g_card_display_last_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+            strlcpy(g_card_display_source, source != NULL ? source : "unknown", sizeof(g_card_display_source));
+            strlcpy(g_card_display_device, device[0] != '\0' ? device : "cardputer", sizeof(g_card_display_device));
+            strlcpy(g_card_display_title, "Cardputer Remote Display", sizeof(g_card_display_title));
+            strlcpy(g_card_display_body, "Paired. Cardputer can now use this Tab as a larger display and Wi-Fi helper.", sizeof(g_card_display_body));
+            snprintf(g_card_display_status, sizeof(g_card_display_status), "Paired via %.15s.", g_card_display_source);
+            cardputer_queue_command(source, "open", "card-display", "");
+            card_display_send_response(source, "paired", "Remote display paired.");
+            update_activity_from_task("Card Display", g_card_display_status);
+            append_event("card_display_paired");
+        } else {
+            g_card_display_pair_failures++;
+            snprintf(g_card_display_status,
+                     sizeof(g_card_display_status),
+                     "Pair failed. Enter code %.7s on the Cardputer.",
+                     g_card_display_pair_code);
+            cardputer_queue_command(source, "open", "card-display", "");
+            card_display_send_response(source, "pair_failed", "Wrong pair code.");
+            update_activity_from_task("Card Display", g_card_display_status);
+            append_event("card_display_pair_failed");
+        }
+        request_active_app_refresh();
+        return true;
+    }
+
+    if (is_end) {
+        g_card_display_paired = false;
+        strlcpy(g_card_display_title, "Cardputer Remote Display", sizeof(g_card_display_title));
+        strlcpy(g_card_display_body, "Session ended. Pair again to resume remote display.", sizeof(g_card_display_body));
+        strlcpy(g_card_display_status, "Remote display disconnected.", sizeof(g_card_display_status));
+        cardputer_queue_command(source, "open", "card-display", "");
+        card_display_send_response(source, "ended", "Remote display ended.");
+        update_activity_from_task("Card Display", g_card_display_status);
+        append_event("card_display_ended");
+        request_active_app_refresh();
+        return true;
+    }
+
+    if (!g_card_display_paired) {
+        snprintf(g_card_display_status,
+                 sizeof(g_card_display_status),
+                 "Pair required. Code %.7s.",
+                 g_card_display_pair_code);
+        cardputer_queue_command(source, "open", "card-display", "");
+        card_display_send_response(source, "pair_required", "Open Card Display and enter the code.");
+        update_activity_from_task("Card Display", g_card_display_status);
+        request_active_app_refresh();
+        return true;
+    }
+
+    g_card_display_last_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    strlcpy(g_card_display_source, source != NULL ? source : "unknown", sizeof(g_card_display_source));
+    strlcpy(g_card_display_device, device[0] != '\0' ? device : "cardputer", sizeof(g_card_display_device));
+    if (title[0] != '\0') {
+        strlcpy(g_card_display_title, title, sizeof(g_card_display_title));
+    }
+    if (body[0] != '\0') {
+        strlcpy(g_card_display_body, body, sizeof(g_card_display_body));
+    }
+    if (status[0] != '\0') {
+        strlcpy(g_card_display_status, status, sizeof(g_card_display_status));
+    }
+
+    bool wants_wifi = strcmp(tabforge, "cardputer.remote.wifi") == 0 ||
+                      strcmp(request, "wifi-scan") == 0 ||
+                      strcmp(request, "wifi") == 0;
+    bool wants_compute = strcmp(tabforge, "cardputer.remote.compute") == 0 ||
+                         strcmp(request, "compute") == 0 ||
+                         strcmp(request, "helper") == 0;
+    if (wants_wifi) {
+        g_card_display_wifi_requests++;
+        xTaskCreate(wifi_scan_task, "tabforge-card-wifi", 6144, NULL, 5, NULL);
+        snprintf(g_card_display_status, sizeof(g_card_display_status), "Tab Wi-Fi scan requested for Cardputer.");
+        card_display_send_response(source, "wifi_scan", "Tab Wi-Fi scan started.");
+        append_event("card_display_wifi_scan");
+    } else if (wants_compute) {
+        g_card_display_processing_requests++;
+        snprintf(g_card_display_status, sizeof(g_card_display_status), "Tab helper processing request accepted.");
+        card_display_send_response(source, "compute", "Tab helper accepted request.");
+        append_event("card_display_compute");
+    } else {
+        g_card_display_frame_count++;
+        card_display_send_response(source, "frame", "Remote display frame received.");
+        append_event("card_display_frame");
+    }
+
+    cardputer_queue_command(source, "open", "card-display", "");
+    update_activity_from_task("Card Display", g_card_display_status);
+    request_active_app_refresh();
+    return true;
+}
+
 static bool cardputer_handle_json_line(const char *source, const char *line)
 {
     if (line == NULL || line[0] == '\0') {
@@ -2742,6 +2933,11 @@ static bool cardputer_handle_json_line(const char *source, const char *line)
     copy_json_string(root, "command", command, sizeof(command));
     copy_json_string(root, "app", app, sizeof(app));
     copy_json_string(root, "action", action, sizeof(action));
+
+    if (card_display_handle_json_line(source, root, tabforge)) {
+        cJSON_Delete(root);
+        return true;
+    }
 
     bool is_command = strcmp(tabforge, "cardputer.command") == 0 ||
                       (strcmp(device, "cardputer") == 0 && command[0] != '\0');
@@ -6176,6 +6372,52 @@ static void cardputer_clear_button_event_cb(lv_event_t *event)
     request_active_app_refresh();
 }
 
+static void card_display_new_pair_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    card_display_generate_pair_code();
+    g_card_display_paired = false;
+    snprintf(g_card_display_status,
+             sizeof(g_card_display_status),
+             "New pair code %.7s. Enter it on Cardputer.",
+             g_card_display_pair_code);
+    strlcpy(g_card_display_body, "Pair code refreshed. Use the Cardputer Remote Display app to connect.", sizeof(g_card_display_body));
+    set_activity("Card Display Pairing", g_card_display_status);
+    append_event("card_display_pair_code_new");
+    request_active_app_refresh();
+}
+
+static void card_display_wifi_helper_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    g_card_display_wifi_requests++;
+    xTaskCreate(wifi_scan_task, "tabforge-card-wifi", 6144, NULL, 5, NULL);
+    snprintf(g_card_display_status,
+             sizeof(g_card_display_status),
+             "Tab Wi-Fi helper scan %lu requested.",
+             (unsigned long)g_card_display_wifi_requests);
+    set_activity("Card Display Wi-Fi", g_card_display_status);
+    append_event("card_display_wifi_scan_button");
+    request_active_app_refresh();
+}
+
+static void card_display_end_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    g_card_display_paired = false;
+    strlcpy(g_card_display_body, "Remote display session ended on the Tab.", sizeof(g_card_display_body));
+    strlcpy(g_card_display_status, "Disconnected. Pair again to resume.", sizeof(g_card_display_status));
+    set_activity("Card Display", g_card_display_status);
+    append_event("card_display_end_button");
+    request_active_app_refresh();
+}
+
 static bool mini_app_run_cardputer_action(mini_app_action_t *action)
 {
     if (action == NULL) {
@@ -6780,6 +7022,7 @@ static app_id_t cardputer_app_from_name(const char *app)
     if (strcmp(app, "roadscout") == 0 || strcmp(app, "road-scout") == 0 || strcmp(app, "roadlens") == 0) return APP_ROADSCOUT;
     if (strcmp(app, "wardrive") == 0 || strcmp(app, "war-drive") == 0 || strcmp(app, "survey") == 0) return APP_WARDRIVE;
     if (strcmp(app, "cardputer") == 0 || strcmp(app, "keyboard") == 0) return APP_CARDPUTER;
+    if (strcmp(app, "card-display") == 0 || strcmp(app, "display") == 0 || strcmp(app, "remote-display") == 0) return APP_CARD_DISPLAY;
     if (strcmp(app, "files") == 0 || strcmp(app, "sd") == 0) return APP_FILES;
     if (strcmp(app, "store") == 0 || strcmp(app, "apps-store") == 0) return APP_STORE;
     if (strcmp(app, "update") == 0 || strcmp(app, "ota") == 0) return APP_UPDATE;
