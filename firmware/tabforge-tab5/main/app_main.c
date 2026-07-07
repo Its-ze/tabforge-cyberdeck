@@ -178,7 +178,7 @@
 #define TABFORGE_SDR_MAX_USB_DEVICES 4
 #define TABFORGE_SDR_SCAN_INTERVAL_MS 2500
 #define TABFORGE_SDR_STATUS_LEN 112
-#define TABFORGE_CARDPUTER_LINE_LEN 192
+#define TABFORGE_CARDPUTER_LINE_LEN 384
 #define TABFORGE_CARDPUTER_TEXT_LEN 64
 #define TABFORGE_CARDPUTER_LAST_LEN 80
 #define TABFORGE_CARDPUTER_COMMAND_LEN 32
@@ -6458,6 +6458,53 @@ static bool mini_app_run_cardputer_action(mini_app_action_t *action)
         append_event("cardputer_stats_cleared");
         return true;
     }
+    if (strcmp(action->mode, "card-display-open") == 0) {
+        card_display_ensure_pair_code();
+        g_active_app = APP_CARD_DISPLAY;
+        show_nav_page(NAV_PAGE_APP);
+        strlcpy(g_mini_app_status, "Opened Card Display.", sizeof(g_mini_app_status));
+        set_activity("Card Display", g_card_display_status);
+        return true;
+    }
+    if (strcmp(action->mode, "card-display-new-code") == 0) {
+        card_display_generate_pair_code();
+        g_card_display_paired = false;
+        snprintf(g_card_display_status,
+                 sizeof(g_card_display_status),
+                 "New pair code %.7s. Enter it on Cardputer.",
+                 g_card_display_pair_code);
+        g_active_app = APP_CARD_DISPLAY;
+        show_nav_page(NAV_PAGE_APP);
+        strlcpy(g_mini_app_status, g_card_display_status, sizeof(g_mini_app_status));
+        set_activity("Card Display Pairing", g_card_display_status);
+        append_event("card_display_pair_code_mini_app");
+        return true;
+    }
+    if (strcmp(action->mode, "card-display-wifi") == 0) {
+        g_card_display_wifi_requests++;
+        xTaskCreate(wifi_scan_task, "tabforge-card-wifi", 6144, NULL, 5, NULL);
+        snprintf(g_card_display_status,
+                 sizeof(g_card_display_status),
+                 "Tab Wi-Fi helper scan %lu requested.",
+                 (unsigned long)g_card_display_wifi_requests);
+        g_active_app = APP_CARD_DISPLAY;
+        show_nav_page(NAV_PAGE_APP);
+        strlcpy(g_mini_app_status, g_card_display_status, sizeof(g_mini_app_status));
+        set_activity("Card Display Wi-Fi", g_card_display_status);
+        append_event("card_display_wifi_scan_mini_app");
+        return true;
+    }
+    if (strcmp(action->mode, "card-display-end") == 0) {
+        g_card_display_paired = false;
+        strlcpy(g_card_display_body, "Remote display session ended.", sizeof(g_card_display_body));
+        strlcpy(g_card_display_status, "Disconnected. Pair again to resume.", sizeof(g_card_display_status));
+        g_active_app = APP_CARD_DISPLAY;
+        show_nav_page(NAV_PAGE_APP);
+        strlcpy(g_mini_app_status, g_card_display_status, sizeof(g_mini_app_status));
+        set_activity("Card Display", g_card_display_status);
+        append_event("card_display_end_mini_app");
+        return true;
+    }
     return false;
 }
 
@@ -7309,6 +7356,37 @@ static bool cardputer_run_tab_action_locked(const char *action)
         strlcpy(g_mini_app_status, "Mini app closed.", sizeof(g_mini_app_status));
         set_activity("App Store", g_mini_app_status);
         append_event("mini_app_closed");
+    } else if (strcmp(action, "card-display-open") == 0 || strcmp(action, "remote-display-open") == 0) {
+        card_display_ensure_pair_code();
+        cardputer_open_tab_app_locked("card-display");
+        set_activity("Card Display", g_card_display_status);
+    } else if (strcmp(action, "card-display-new-code") == 0) {
+        card_display_generate_pair_code();
+        g_card_display_paired = false;
+        snprintf(g_card_display_status,
+                 sizeof(g_card_display_status),
+                 "New pair code %.7s. Enter it on Cardputer.",
+                 g_card_display_pair_code);
+        cardputer_open_tab_app_locked("card-display");
+        set_activity("Card Display Pairing", g_card_display_status);
+        append_event("card_display_pair_code_cardputer");
+    } else if (strcmp(action, "card-display-wifi") == 0 || strcmp(action, "tab-wifi-helper") == 0) {
+        g_card_display_wifi_requests++;
+        xTaskCreate(wifi_scan_task, "tabforge-card-wifi", 6144, NULL, 5, NULL);
+        snprintf(g_card_display_status,
+                 sizeof(g_card_display_status),
+                 "Tab Wi-Fi helper scan %lu requested.",
+                 (unsigned long)g_card_display_wifi_requests);
+        cardputer_open_tab_app_locked("card-display");
+        set_activity("Card Display Wi-Fi", g_card_display_status);
+        append_event("card_display_wifi_scan_cardputer");
+    } else if (strcmp(action, "card-display-end") == 0 || strcmp(action, "remote-display-end") == 0) {
+        g_card_display_paired = false;
+        strlcpy(g_card_display_body, "Remote display session ended.", sizeof(g_card_display_body));
+        strlcpy(g_card_display_status, "Disconnected. Pair again to resume.", sizeof(g_card_display_status));
+        cardputer_open_tab_app_locked("card-display");
+        set_activity("Card Display", g_card_display_status);
+        append_event("card_display_end_cardputer");
     } else if (strcmp(action, "cardputer-probe") == 0) {
         cardputer_send_probe();
     } else if (strcmp(action, "cardputer-open") == 0) {
@@ -7615,10 +7693,10 @@ static void build_home_page(lv_obj_t *parent, lv_coord_t width, lv_coord_t heigh
     add_home_nav_shortcut(parent, LV_SYMBOL_SETTINGS, "Settings", "Display + power", 0x61d5f0, tile_w, tile_h, settings_button_event_cb);
     add_home_app_shortcut(parent, find_tile_by_app(APP_MESHTASTIC), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_MESHCORE), tile_w, tile_h);
+    add_home_app_shortcut(parent, find_tile_by_app(APP_CARD_DISPLAY), tile_w, tile_h);
+    add_home_app_shortcut(parent, find_tile_by_app(APP_CARDPUTER), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_ROADSCOUT), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_WARDRIVE), tile_w, tile_h);
-    add_home_app_shortcut(parent, find_tile_by_app(APP_SDR), tile_w, tile_h);
-    add_home_app_shortcut(parent, find_tile_by_app(APP_STORE), tile_w, tile_h);
 }
 
 static void add_app_row(lv_obj_t *parent, const feature_tile_t *tile, lv_coord_t width, lv_coord_t height)
@@ -8162,14 +8240,16 @@ static void add_app_actions(lv_obj_t *parent,
     } else if (app_id == APP_MESHCORE || app_id == APP_TDECK || app_id == APP_RECORDER ||
                app_id == APP_USB || app_id == APP_IR || app_id == APP_SDR ||
                app_id == APP_ROADSCOUT || app_id == APP_WARDRIVE ||
-               app_id == APP_CARDPUTER || app_id == APP_FILES || app_id == APP_STORE) {
+               app_id == APP_CARDPUTER || app_id == APP_CARD_DISPLAY ||
+               app_id == APP_FILES || app_id == APP_STORE) {
         action_h = landscape ? 150 : 348;
     }
     lv_obj_set_size(actions, width, action_h);
     if (app_id == APP_MESSAGES || app_id == APP_MESHTASTIC || app_id == APP_MESHCORE || app_id == APP_TDECK ||
         app_id == APP_RECORDER || app_id == APP_USB || app_id == APP_IR ||
         app_id == APP_SDR || app_id == APP_ROADSCOUT || app_id == APP_WARDRIVE ||
-        app_id == APP_CARDPUTER || app_id == APP_FILES || app_id == APP_STORE) {
+        app_id == APP_CARDPUTER || app_id == APP_CARD_DISPLAY ||
+        app_id == APP_FILES || app_id == APP_STORE) {
         lv_obj_add_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scrollbar_mode(actions, LV_SCROLLBAR_MODE_AUTO);
     } else {
@@ -8275,6 +8355,13 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Probe", cardputer_probe_button_event_cb);
         make_button(actions, button_w, "Wi-Fi Text", cardputer_wifi_button_event_cb);
         make_button(actions, button_w, "Clear", cardputer_clear_button_event_cb);
+        break;
+    case APP_CARD_DISPLAY:
+        make_button(actions, button_w, "New Code", card_display_new_pair_button_event_cb);
+        make_button(actions, button_w, "Power Link", cardputer_power_button_event_cb);
+        make_button(actions, button_w, "Probe", cardputer_probe_button_event_cb);
+        make_button(actions, button_w, "Wi-Fi Helper", card_display_wifi_helper_button_event_cb);
+        make_button(actions, button_w, "End Session", card_display_end_button_event_cb);
         break;
     case APP_FILES:
         make_button(actions, button_w, "SD Apps", app_store_sd_button_event_cb);
@@ -8551,6 +8638,37 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Input", line_b, width - 32, 0xf1f7f3);
         add_app_status_line(card, "Last", line_c, width - 32, 0xf0bf4f);
         add_app_status_line(card, "Wiring", "Grove UART: Tab TX G53/yellow, Tab RX G54/white; Cardputer TX white/GPIO1.", width - 32, 0x93a6ad);
+        break;
+    }
+    case APP_CARD_DISPLAY: {
+        card_display_ensure_pair_code();
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+        uint64_t age_s = g_card_display_last_ms > 0 ? (now_ms - g_card_display_last_ms) / 1000ULL : 0;
+        snprintf(line_a,
+                 sizeof(line_a),
+                 "Code %.7s | %s | pairs %lu failed %lu",
+                 g_card_display_pair_code,
+                 g_card_display_paired ? "paired" : "waiting",
+                 (unsigned long)g_card_display_pair_count,
+                 (unsigned long)g_card_display_pair_failures);
+        snprintf(line_b,
+                 sizeof(line_b),
+                 "Source %.15s | device %.20s | last %llus",
+                 g_card_display_source,
+                 g_card_display_device,
+                 (unsigned long long)age_s);
+        snprintf(line_c,
+                 sizeof(line_c),
+                 "Frames %lu | Wi-Fi helper %lu | processing %lu",
+                 (unsigned long)g_card_display_frame_count,
+                 (unsigned long)g_card_display_wifi_requests,
+                 (unsigned long)g_card_display_processing_requests);
+        add_app_status_line(card, "Pair", line_a, width - 32, g_card_display_paired ? 0x77dd88 : 0xffc857);
+        add_app_status_line(card, "Link", line_b, width - 32, 0x22d3ee);
+        add_app_status_line(card, "Offload", line_c, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Title", g_card_display_title, width - 32, 0x22d3ee);
+        add_app_status_line(card, "Remote", g_card_display_body, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Status", g_card_display_status, width - 32, g_card_display_paired ? 0x77dd88 : 0x93a6ad);
         break;
     }
     case APP_FILES:
