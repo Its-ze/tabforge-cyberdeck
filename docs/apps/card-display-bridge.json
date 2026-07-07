@@ -1,0 +1,46 @@
+{
+  "schema": "tabforge.mini-app.v1",
+  "id": "card-display-bridge",
+  "name": "Card Display Bridge",
+  "version": "0.1.0",
+  "summary": "Native controls for pairing an M5Stack Cardputer to the Tab5 as a remote external display and Wi-Fi helper.",
+  "surface": "tab5",
+  "store": {
+    "category": "Input",
+    "icon": "DSP",
+    "status": "stable",
+    "minFirmware": "0.1.37",
+    "releaseNotes": "Adds native Card Display controls for pairing, Wi-Fi helper scans, and ending remote display sessions."
+  },
+  "permissions": {
+    "nativeCode": false,
+    "cardputer": true,
+    "wifiOptional": true
+  },
+  "actions": [
+    {
+      "id": "open",
+      "label": "Open Display",
+      "mode": "card-display-open",
+      "protocol": "cardputer"
+    },
+    {
+      "id": "new-code",
+      "label": "New Pair Code",
+      "mode": "card-display-new-code",
+      "protocol": "cardputer"
+    },
+    {
+      "id": "wifi-helper",
+      "label": "Wi-Fi Helper",
+      "mode": "card-display-wifi",
+      "protocol": "cardputer"
+    },
+    {
+      "id": "end",
+      "label": "End Session",
+      "mode": "card-display-end",
+      "protocol": "cardputer"
+    }
+  ]
+}

@@ -2,7 +2,7 @@
     "schema":  "tabforge.app-store.v1",
     "project":  "tabforge-cyberdeck",
     "channel":  "stable",
-    "updated":  "2026-06-29",
+    "updated":  "2026-07-07",
     "libraryUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/",
     "notes":  "Data-driven TabForge mini-app packages. Packages are JSON only, SHA256-checked, and do not contain native executable code.",
     "updatePolicy":  {
@@ -12,6 +12,23 @@
                          "hash":  "sha256"
                      },
     "apps":  [
+                 {
+                     "id":  "card-display-bridge",
+                     "name":  "Card Display Bridge",
+                     "summary":  "Native controls for pairing an M5Stack Cardputer to the Tab5 as a remote external display and Wi-Fi helper.",
+                     "version":  "0.1.0",
+                     "surface":  "tab5",
+                     "category":  "Input",
+                     "icon":  "DSP",
+                     "status":  "stable",
+                     "minFirmware":  "0.1.37",
+                     "releaseNotes":  "Adds native Card Display controls for pairing, Wi-Fi helper scans, and ending remote display sessions.",
+                     "actionCount":  4,
+                     "packageUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/card-display-bridge.json",
+                     "installedPath":  "/tabforge/apps/card-display-bridge.json",
+                     "sha256":  "5a2ed0a6ed145c80138e438fd60008d4a35bd761a4da3e6a699f1a628524d5c0",
+                     "size":  1155
+                 },
                  {
                      "id":  "cardputer-keyboard",
                      "name":  "Cardputer AppDeck",
