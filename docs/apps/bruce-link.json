@@ -1,0 +1,47 @@
+{
+  "schema": "tabforge.mini-app.v1",
+  "id": "bruce-link",
+  "name": "Bruce Link",
+  "version": "0.1.0",
+  "surface": "tab5",
+  "summary": "Keep Bruce installed on the Cardputer and control it from the Tab5 over Bruce serial CLI commands.",
+  "store": {
+    "category": "Input",
+    "icon": "BRC",
+    "status": "stable",
+    "minFirmware": "0.1.42",
+    "releaseNotes": "Adds a Bruce-safe Cardputer control path using Bruce serial commands instead of replacing the firmware."
+  },
+  "permissions": {
+    "nativeCode": false,
+    "usbHost": true,
+    "groveUart": true,
+    "bruceSerial": true
+  },
+  "actions": [
+    {
+      "id": "open",
+      "label": "Open Bruce",
+      "mode": "bruce-open",
+      "protocol": "bruce"
+    },
+    {
+      "id": "info",
+      "label": "Info",
+      "mode": "bruce-info",
+      "protocol": "bruce"
+    },
+    {
+      "id": "files",
+      "label": "Files",
+      "mode": "bruce-files",
+      "protocol": "bruce"
+    },
+    {
+      "id": "webui",
+      "label": "WebUI",
+      "mode": "bruce-webui",
+      "protocol": "bruce"
+    }
+  ]
+}

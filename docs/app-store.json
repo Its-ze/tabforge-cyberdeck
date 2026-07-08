@@ -2,7 +2,7 @@
     "schema":  "tabforge.app-store.v1",
     "project":  "tabforge-cyberdeck",
     "channel":  "stable",
-    "updated":  "2026-07-07",
+    "updated":  "2026-07-08",
     "libraryUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/",
     "notes":  "Data-driven TabForge mini-app packages. Packages are JSON only, SHA256-checked, and do not contain native executable code.",
     "updatePolicy":  {
@@ -12,6 +12,23 @@
                          "hash":  "sha256"
                      },
     "apps":  [
+                 {
+                     "id":  "bruce-link",
+                     "name":  "Bruce Link",
+                     "summary":  "Keep Bruce installed on the Cardputer and control it from the Tab5 over Bruce serial CLI commands.",
+                     "version":  "0.1.0",
+                     "surface":  "tab5",
+                     "category":  "Input",
+                     "icon":  "BRC",
+                     "status":  "stable",
+                     "minFirmware":  "0.1.42",
+                     "releaseNotes":  "Adds a Bruce-safe Cardputer control path using Bruce serial commands instead of replacing the firmware.",
+                     "actionCount":  4,
+                     "packageUrl":  "https://its-ze.github.io/tabforge-cyberdeck/apps/bruce-link.json",
+                     "installedPath":  "/tabforge/apps/bruce-link.json",
+                     "sha256":  "880e76144cd05e1cde5cf30e79a18dcff091bd6711040bfffff545dd1d808570",
+                     "size":  1072
+                 },
                  {
                      "id":  "card-display-bridge",
                      "name":  "Card Display Bridge",

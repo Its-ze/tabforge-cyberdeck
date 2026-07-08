@@ -6574,6 +6574,62 @@ static void card_display_end_button_event_cb(lv_event_t *event)
     request_active_app_refresh();
 }
 
+static void bruce_info_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        (void)bruce_send_command("info", "bruce info");
+    }
+}
+
+static void bruce_files_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        (void)bruce_send_command("storage list /", "bruce files");
+    }
+}
+
+static void bruce_settings_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        (void)bruce_send_command("settings", "bruce settings");
+    }
+}
+
+static void bruce_webui_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        (void)bruce_send_command("webui", "bruce webui");
+    }
+}
+
+static void bruce_ir_rx_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        (void)bruce_send_command("ir rx 10", "bruce ir rx");
+    }
+}
+
+static void bruce_sleep_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+        (void)bruce_send_command("power sleep", "bruce sleep");
+    }
+}
+
+static void bruce_clear_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+    g_bruce_response_count = 0;
+    g_bruce_parse_errors = 0;
+    strlcpy(g_bruce_last_response, "Cleared. Send Info to probe Bruce.", sizeof(g_bruce_last_response));
+    strlcpy(g_bruce_status, "Bruce Link counters cleared.", sizeof(g_bruce_status));
+    set_activity("Bruce Link", g_bruce_status);
+    append_event("bruce_stats_cleared");
+    request_active_app_refresh();
+}
+
 static bool mini_app_run_cardputer_action(mini_app_action_t *action)
 {
     if (action == NULL) {
@@ -6659,6 +6715,46 @@ static bool mini_app_run_cardputer_action(mini_app_action_t *action)
         strlcpy(g_mini_app_status, g_card_display_status, sizeof(g_mini_app_status));
         set_activity("Card Display", g_card_display_status);
         append_event("card_display_end_mini_app");
+        return true;
+    }
+    return false;
+}
+
+static bool mini_app_run_bruce_action(mini_app_action_t *action)
+{
+    if (action == NULL) {
+        return false;
+    }
+    if (strcmp(action->mode, "bruce-open") == 0) {
+        g_active_app = APP_BRUCE;
+        show_nav_page(NAV_PAGE_APP);
+        strlcpy(g_mini_app_status, "Opened Bruce Link.", sizeof(g_mini_app_status));
+        set_activity("Bruce Link", g_bruce_status);
+        return true;
+    }
+    if (strcmp(action->mode, "bruce-info") == 0) {
+        (void)bruce_send_command("info", "bruce info");
+        strlcpy(g_mini_app_status, "Bruce info requested.", sizeof(g_mini_app_status));
+        return true;
+    }
+    if (strcmp(action->mode, "bruce-files") == 0) {
+        (void)bruce_send_command("storage list /", "bruce files");
+        strlcpy(g_mini_app_status, "Bruce storage list requested.", sizeof(g_mini_app_status));
+        return true;
+    }
+    if (strcmp(action->mode, "bruce-settings") == 0) {
+        (void)bruce_send_command("settings", "bruce settings");
+        strlcpy(g_mini_app_status, "Bruce settings requested.", sizeof(g_mini_app_status));
+        return true;
+    }
+    if (strcmp(action->mode, "bruce-webui") == 0) {
+        (void)bruce_send_command("webui", "bruce webui");
+        strlcpy(g_mini_app_status, "Bruce WebUI requested.", sizeof(g_mini_app_status));
+        return true;
+    }
+    if (strcmp(action->mode, "bruce-ir-rx") == 0) {
+        (void)bruce_send_command("ir rx 10", "bruce ir rx");
+        strlcpy(g_mini_app_status, "Bruce IR receive started.", sizeof(g_mini_app_status));
         return true;
     }
     return false;
@@ -6846,6 +6942,11 @@ static void mini_app_run_action(uint8_t index)
     if (strncmp(action->mode, "cardputer-", 10) == 0) {
         if (!mini_app_run_cardputer_action(action)) {
             snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.31s has no Cardputer handler.", action->label);
+            set_activity("Mini App", g_mini_app_status);
+        }
+    } else if (strncmp(action->mode, "bruce-", 6) == 0) {
+        if (!mini_app_run_bruce_action(action)) {
+            snprintf(g_mini_app_status, sizeof(g_mini_app_status), "%.31s has no Bruce handler.", action->label);
             set_activity("Mini App", g_mini_app_status);
         }
     } else if (strncmp(action->mode, "sdr-", 4) == 0) {
@@ -7226,6 +7327,7 @@ static app_id_t cardputer_app_from_name(const char *app)
     if (strcmp(app, "wardrive") == 0 || strcmp(app, "war-drive") == 0 || strcmp(app, "survey") == 0) return APP_WARDRIVE;
     if (strcmp(app, "cardputer") == 0 || strcmp(app, "keyboard") == 0) return APP_CARDPUTER;
     if (strcmp(app, "card-display") == 0 || strcmp(app, "display") == 0 || strcmp(app, "remote-display") == 0) return APP_CARD_DISPLAY;
+    if (strcmp(app, "bruce") == 0 || strcmp(app, "bruce-link") == 0 || strcmp(app, "bruce-control") == 0) return APP_BRUCE;
     if (strcmp(app, "files") == 0 || strcmp(app, "sd") == 0) return APP_FILES;
     if (strcmp(app, "store") == 0 || strcmp(app, "apps-store") == 0) return APP_STORE;
     if (strcmp(app, "update") == 0 || strcmp(app, "ota") == 0) return APP_UPDATE;
@@ -7545,6 +7647,23 @@ static bool cardputer_run_tab_action_locked(const char *action)
         cardputer_open_tab_app_locked("card-display");
         set_activity("Card Display", g_card_display_status);
         append_event("card_display_end_cardputer");
+    } else if (strcmp(action, "bruce-open") == 0) {
+        cardputer_open_tab_app_locked("bruce");
+    } else if (strcmp(action, "bruce-info") == 0) {
+        cardputer_open_tab_app_locked("bruce");
+        (void)bruce_send_command("info", "bruce info");
+    } else if (strcmp(action, "bruce-files") == 0) {
+        cardputer_open_tab_app_locked("bruce");
+        (void)bruce_send_command("storage list /", "bruce files");
+    } else if (strcmp(action, "bruce-settings") == 0) {
+        cardputer_open_tab_app_locked("bruce");
+        (void)bruce_send_command("settings", "bruce settings");
+    } else if (strcmp(action, "bruce-webui") == 0) {
+        cardputer_open_tab_app_locked("bruce");
+        (void)bruce_send_command("webui", "bruce webui");
+    } else if (strcmp(action, "bruce-ir-rx") == 0) {
+        cardputer_open_tab_app_locked("bruce");
+        (void)bruce_send_command("ir rx 10", "bruce ir rx");
     } else if (strcmp(action, "cardputer-probe") == 0) {
         cardputer_send_probe();
     } else if (strcmp(action, "cardputer-open") == 0) {
@@ -7851,7 +7970,7 @@ static void build_home_page(lv_obj_t *parent, lv_coord_t width, lv_coord_t heigh
     add_home_nav_shortcut(parent, LV_SYMBOL_SETTINGS, "Settings", "Display + power", 0x61d5f0, tile_w, tile_h, settings_button_event_cb);
     add_home_app_shortcut(parent, find_tile_by_app(APP_MESHTASTIC), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_MESHCORE), tile_w, tile_h);
-    add_home_app_shortcut(parent, find_tile_by_app(APP_CARD_DISPLAY), tile_w, tile_h);
+    add_home_app_shortcut(parent, find_tile_by_app(APP_BRUCE), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_CARDPUTER), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_ROADSCOUT), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_WARDRIVE), tile_w, tile_h);
@@ -8398,7 +8517,7 @@ static void add_app_actions(lv_obj_t *parent,
     } else if (app_id == APP_MESHCORE || app_id == APP_TDECK || app_id == APP_RECORDER ||
                app_id == APP_USB || app_id == APP_IR || app_id == APP_SDR ||
                app_id == APP_ROADSCOUT || app_id == APP_WARDRIVE ||
-               app_id == APP_CARDPUTER || app_id == APP_CARD_DISPLAY ||
+               app_id == APP_CARDPUTER || app_id == APP_CARD_DISPLAY || app_id == APP_BRUCE ||
                app_id == APP_FILES || app_id == APP_STORE) {
         action_h = landscape ? 150 : 348;
     }
@@ -8406,7 +8525,7 @@ static void add_app_actions(lv_obj_t *parent,
     if (app_id == APP_MESSAGES || app_id == APP_MESHTASTIC || app_id == APP_MESHCORE || app_id == APP_TDECK ||
         app_id == APP_RECORDER || app_id == APP_USB || app_id == APP_IR ||
         app_id == APP_SDR || app_id == APP_ROADSCOUT || app_id == APP_WARDRIVE ||
-        app_id == APP_CARDPUTER || app_id == APP_CARD_DISPLAY ||
+        app_id == APP_CARDPUTER || app_id == APP_CARD_DISPLAY || app_id == APP_BRUCE ||
         app_id == APP_FILES || app_id == APP_STORE) {
         lv_obj_add_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_scrollbar_mode(actions, LV_SCROLLBAR_MODE_AUTO);
@@ -8520,6 +8639,15 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Probe", cardputer_probe_button_event_cb);
         make_button(actions, button_w, "Wi-Fi Helper", card_display_wifi_helper_button_event_cb);
         make_button(actions, button_w, "End Session", card_display_end_button_event_cb);
+        break;
+    case APP_BRUCE:
+        make_button(actions, button_w, "Info", bruce_info_button_event_cb);
+        make_button(actions, button_w, "Files", bruce_files_button_event_cb);
+        make_button(actions, button_w, "Settings", bruce_settings_button_event_cb);
+        make_button(actions, button_w, "WebUI", bruce_webui_button_event_cb);
+        make_button(actions, button_w, "IR RX", bruce_ir_rx_button_event_cb);
+        make_button(actions, button_w, "Sleep", bruce_sleep_button_event_cb);
+        make_button(actions, button_w, "Clear", bruce_clear_button_event_cb);
         break;
     case APP_FILES:
         make_button(actions, button_w, "SD Apps", app_store_sd_button_event_cb);
@@ -8827,6 +8955,40 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Title", g_card_display_title, width - 32, 0x22d3ee);
         add_app_status_line(card, "Remote", g_card_display_body, width - 32, 0xf1f7f3);
         add_app_status_line(card, "Status", g_card_display_status, width - 32, g_card_display_paired ? 0x77dd88 : 0x93a6ad);
+        break;
+    }
+    case APP_BRUCE: {
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+        uint64_t command_age_s = g_bruce_last_command_ms > 0 ? (now_ms - g_bruce_last_command_ms) / 1000ULL : 0;
+        uint64_t response_age_s = g_bruce_last_response_ms > 0 ? (now_ms - g_bruce_last_response_ms) / 1000ULL : 0;
+        snprintf(line_a,
+                 sizeof(line_a),
+                 "Bruce stays on Cardputer | USB %s | Grove %s",
+                 usb_state_text(),
+                 g_grove_uart_ready ? "ready" : "off");
+        snprintf(line_b,
+                 sizeof(line_b),
+                 "cmds %lu | rx %lu | errors %lu | source %.12s",
+                 (unsigned long)g_bruce_command_count,
+                 (unsigned long)g_bruce_response_count,
+                 (unsigned long)g_bruce_parse_errors,
+                 g_bruce_last_source);
+        snprintf(line_c,
+                 sizeof(line_c),
+                 "last command %.56s | %llus",
+                 g_bruce_last_command,
+                 (unsigned long long)command_age_s);
+        add_app_status_line(card, "Mode", line_a, width - 32, 0x65f4c8);
+        add_app_status_line(card, "Serial", line_b, width - 32, g_bruce_seen ? 0x77dd88 : 0xffc857);
+        add_app_status_line(card, "Command", line_c, width - 32, 0xf1f7f3);
+        snprintf(line_a,
+                 sizeof(line_a),
+                 "%.96s | %llus",
+                 g_bruce_last_response,
+                 (unsigned long long)response_age_s);
+        add_app_status_line(card, "Response", line_a, width - 32, g_bruce_seen ? 0x77dd88 : 0x93a6ad);
+        add_app_status_line(card, "Status", g_bruce_status, width - 32, 0x93a6ad);
+        add_app_status_line(card, "Commands", "Info, storage list, settings, webui, IR receive, and sleep use Bruce serial CLI.", width - 32, 0xf1f7f3);
         break;
     }
     case APP_FILES:
