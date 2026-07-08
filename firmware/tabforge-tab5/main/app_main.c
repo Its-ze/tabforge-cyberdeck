@@ -791,7 +791,6 @@ static volatile uint32_t g_input_activity_seq;
 static uint32_t g_sleep_input_seq;
 static bool g_wifi_started;
 static bool g_wifi_has_ip;
-static bool g_wifi_boot_scan_started;
 static wifi_state_t g_wifi_state = WIFI_STATE_OFF;
 static esp_err_t g_wifi_last_error = ESP_OK;
 static wifi_credentials_t g_wifi_credentials;
@@ -835,6 +834,7 @@ static void update_activity_from_task(const char *title, const char *detail);
 static int compare_versions(const char *left, const char *right);
 static void sdr_request_scan(const char *reason);
 static void wifi_scan_task(void *arg);
+static void start_mic_monitor(const char *reason);
 static void append_event(const char *event);
 static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, size_t data_len);
 static bool cardputer_keyboard_present(void);
@@ -849,6 +849,7 @@ static axis3_t g_last_gyro;
 static uint64_t g_last_imu_ms;
 
 static mic_state_t g_mic_state = MIC_STATE_PENDING;
+static bool g_mic_monitor_started;
 static int g_mic_average = -1;
 static int g_mic_peak = -1;
 static uint32_t g_mic_reads;
@@ -3807,6 +3808,8 @@ static void feature_tile_event_cb(lv_event_t *event)
     } else if (g_active_app == APP_MESHCORE) {
         g_meshcore_mode = true;
         refresh_mode_widgets();
+    } else if (g_active_app == APP_RECORDER) {
+        start_mic_monitor("recorder_app");
     }
     show_nav_page(NAV_PAGE_APP);
     append_event(tile->event_name);
@@ -5815,6 +5818,7 @@ static void mesh_send_text(const char *text, bool voice)
 
 static void mesh_capture_voice_draft(void)
 {
+    start_mic_monitor("mesh_voice");
     snprintf(g_mesh_voice_text,
              sizeof(g_mesh_voice_text),
              "Voice note from TabForge avg %d peak %d.",
@@ -7103,6 +7107,8 @@ static void cardputer_open_tab_app_locked(const char *app)
         g_meshcore_mode = false;
     } else if (app_id == APP_MESHCORE) {
         g_meshcore_mode = true;
+    } else if (app_id == APP_RECORDER) {
+        start_mic_monitor("cardputer_recorder");
     }
     show_nav_page(NAV_PAGE_APP);
     const feature_tile_t *tile = find_tile_by_app(app_id);
@@ -9146,9 +9152,6 @@ static void init_wifi_station(void)
 
     if (g_wifi_credentials.auto_connect && g_wifi_credentials.configured) {
         xTaskCreate(wifi_connect_task, "tabforge-wifi-autoconnect", 6144, NULL, 5, NULL);
-    } else if (!g_wifi_boot_scan_started) {
-        g_wifi_boot_scan_started = true;
-        xTaskCreate(wifi_scan_task, "tabforge-wifi-boot-scan", 6144, NULL, 5, NULL);
     }
 }
 
@@ -9597,6 +9600,7 @@ static void mic_monitor_task(void *arg)
     esp_codec_dev_handle_t mic = bsp_audio_codec_microphone_init();
     if (mic == NULL) {
         g_mic_state = MIC_STATE_INIT_FAILED;
+        g_mic_monitor_started = false;
         ESP_LOGW(TABFORGE_TAG, "mic monitor failed: microphone codec init returned NULL");
         vTaskDelete(NULL);
         return;
@@ -9616,6 +9620,7 @@ static void mic_monitor_task(void *arg)
     codec_err = esp_codec_dev_open(mic, &sample_info);
     if (codec_err != ESP_CODEC_DEV_OK) {
         g_mic_state = MIC_STATE_OPEN_FAILED;
+        g_mic_monitor_started = false;
         ESP_LOGW(TABFORGE_TAG, "mic open failed: %d", codec_err);
         vTaskDelete(NULL);
         return;
@@ -9652,6 +9657,24 @@ static void mic_monitor_task(void *arg)
         g_mic_reads++;
         g_mic_state = MIC_STATE_ONLINE;
         vTaskDelay(pdMS_TO_TICKS(800));
+    }
+}
+
+static void start_mic_monitor(const char *reason)
+{
+    if (g_mic_monitor_started) {
+        return;
+    }
+
+    g_mic_state = MIC_STATE_PENDING;
+    BaseType_t created = xTaskCreate(mic_monitor_task, "tabforge-mic-monitor", 6144, NULL, 4, NULL);
+    if (created == pdPASS) {
+        g_mic_monitor_started = true;
+        append_event(reason != NULL && reason[0] != '\0' ? reason : "mic_monitor_requested");
+        ESP_LOGI(TABFORGE_TAG, "mic monitor requested: %s", reason != NULL ? reason : "manual");
+    } else {
+        g_mic_state = MIC_STATE_INIT_FAILED;
+        ESP_LOGW(TABFORGE_TAG, "mic monitor task create failed");
     }
 }
 
@@ -9956,9 +9979,12 @@ void app_main(void)
         build_dashboard(screen);
         bsp_display_unlock();
     }
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     esp_err_t imu_err = init_imu();
+    vTaskDelay(pdMS_TO_TICKS(50));
     init_wifi_station();
+    vTaskDelay(pdMS_TO_TICKS(50));
     start_companion_api_server();
     if (imu_err != ESP_OK) {
 #if BSP_CAPS_IMU
@@ -9968,7 +9994,6 @@ void app_main(void)
 
     xTaskCreate(battery_monitor_task, "tabforge-battery", 4096, NULL, 4, NULL);
     xTaskCreate(heartbeat_task, "tabforge-heartbeat", 4096, NULL, 5, NULL);
-    xTaskCreate(mic_monitor_task, "tabforge-mic-monitor", 6144, NULL, 4, NULL);
     xTaskCreate(accessory_auto_power_task, "tabforge-accessory-power", 3072, NULL, 4, NULL);
     xTaskCreate(usb_cdc_task, "tabforge-usb-cdc", 8192, NULL, 6, NULL);
     xTaskCreate(sdr_usb_monitor_task, "tabforge-sdr-usb", 6144, NULL, 5, NULL);
