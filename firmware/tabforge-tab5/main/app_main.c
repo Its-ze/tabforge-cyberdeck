@@ -94,6 +94,9 @@
 #ifndef LV_SYMBOL_DIRECTORY
 #define LV_SYMBOL_DIRECTORY "[DIR]"
 #endif
+#ifndef LV_SYMBOL_TERMINAL
+#define LV_SYMBOL_TERMINAL "[CLI]"
+#endif
 
 #define TABFORGE_TAG "TabForge"
 #define TABFORGE_SD_ROOT BSP_SD_MOUNT_POINT
@@ -163,7 +166,7 @@
 #define TABFORGE_MESH_MAX_DRAFTS 6
 #define TABFORGE_MESH_CHAT_LINES 8
 #define TABFORGE_MESH_PREVIEW_LEN 96
-#define TABFORGE_APP_STORE_MAX_BYTES 12288
+#define TABFORGE_APP_STORE_MAX_BYTES 16384
 #define TABFORGE_APP_PACKAGE_MAX_BYTES 8192
 #define TABFORGE_APP_ID_LEN 32
 #define TABFORGE_APP_NAME_LEN 48
@@ -188,6 +191,9 @@
 #define TABFORGE_CARD_DISPLAY_TITLE_LEN 48
 #define TABFORGE_CARD_DISPLAY_BODY_LEN 256
 #define TABFORGE_CARD_DISPLAY_STATUS_LEN 96
+#define TABFORGE_BRUCE_LINE_LEN 256
+#define TABFORGE_BRUCE_STATUS_LEN 128
+#define TABFORGE_BRUCE_RESPONSE_WINDOW_MS 15000
 #define TABFORGE_COMPANION_BODY_MAX 1536
 #define TABFORGE_COMPANION_TOKEN_LEN 33
 #define TABFORGE_COMPANION_NAME_LEN 48
@@ -230,6 +236,7 @@ typedef enum {
     APP_WARDRIVE,
     APP_CARDPUTER,
     APP_CARD_DISPLAY,
+    APP_BRUCE,
     APP_FILES,
     APP_STORE,
     APP_UPDATE,
@@ -464,6 +471,12 @@ typedef struct {
 } roadscout_line_state_t;
 
 typedef struct {
+    char line[TABFORGE_BRUCE_LINE_LEN];
+    size_t length;
+    bool active;
+} bruce_line_state_t;
+
+typedef struct {
     bool paired;
     char token[TABFORGE_COMPANION_TOKEN_LEN];
     char phone_name[TABFORGE_COMPANION_NAME_LEN];
@@ -496,6 +509,7 @@ static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_DIRECTORY, "Wardrive", "GPS-stamped Wi-Fi survey logging using Tab scans and attached GPS.", "Survey", "tile_wardrive", APP_WARDRIVE, FEATURE_ACTIVE, 0x77dd88},
     {LV_SYMBOL_KEYBOARD, "Cardputer", "Grove or USB-C keyboard controller for TabForge text entry.", "Keys", "tile_cardputer", APP_CARDPUTER, FEATURE_ACTIVE, 0xf0bf4f},
     {LV_SYMBOL_KEYBOARD, "Card Display", "Use the Tab5 as a paired external display and helper processor for the Cardputer.", "Remote", "tile_card_display", APP_CARD_DISPLAY, FEATURE_ACTIVE, 0x22d3ee},
+    {LV_SYMBOL_TERMINAL, "Bruce Link", "Keep Bruce on the Cardputer and control it over serial/WebUI commands.", "Bruce", "tile_bruce", APP_BRUCE, FEATURE_ACTIVE, 0x65f4c8},
     {LV_SYMBOL_SD_CARD, "Files", "Runtime config, event journal, audio, and backups.", "SD", "tile_sd", APP_FILES, FEATURE_ACTIVE, 0x77dd88},
     {LV_SYMBOL_DOWNLOAD, "Store", "GitHub app catalog with SD-installed mini apps.", "Apps", "tile_store", APP_STORE, FEATURE_ACTIVE, 0x5ec8ff},
     {LV_SYMBOL_DOWNLOAD, "Update", "Internet OTA package checks and confirm button.", "OTA", "tile_update", APP_UPDATE, FEATURE_ACTIVE, 0xffc857},
@@ -745,6 +759,18 @@ static char g_card_display_device[24] = "cardputer";
 static char g_card_display_title[TABFORGE_CARD_DISPLAY_TITLE_LEN] = "Cardputer Remote Display";
 static char g_card_display_body[TABFORGE_CARD_DISPLAY_BODY_LEN] = "Open this app, then pair from the Cardputer Remote Display page.";
 static char g_card_display_status[TABFORGE_CARD_DISPLAY_STATUS_LEN] = "Waiting for Cardputer pairing.";
+static bruce_line_state_t g_bruce_usb_line;
+static bruce_line_state_t g_bruce_grove_line;
+static bool g_bruce_seen;
+static uint32_t g_bruce_command_count;
+static uint32_t g_bruce_response_count;
+static uint32_t g_bruce_parse_errors;
+static uint64_t g_bruce_last_command_ms;
+static uint64_t g_bruce_last_response_ms;
+static char g_bruce_last_source[16] = "none";
+static char g_bruce_last_command[TABFORGE_BRUCE_STATUS_LEN] = "none";
+static char g_bruce_last_response[TABFORGE_BRUCE_STATUS_LEN] = "No Bruce serial response yet.";
+static char g_bruce_status[TABFORGE_BRUCE_STATUS_LEN] = "Bruce stays installed; attach Cardputer over USB host or a serial link and send commands.";
 static gps_line_state_t g_usb_gps_line;
 static gps_line_state_t g_grove_gps_line;
 static bool g_usb_gps_seen;
@@ -838,6 +864,8 @@ static void start_mic_monitor(const char *reason);
 static void append_event(const char *event);
 static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, size_t data_len);
 static bool cardputer_keyboard_present(void);
+static bool bruce_serial_ingest(const char *source, const uint8_t *data, size_t data_len);
+static bool bruce_send_command(const char *command, const char *label);
 static bool gps_stream_ingest(const char *source, const uint8_t *data, size_t data_len);
 static bool roadscout_sensor_ingest(const char *source, const uint8_t *data, size_t data_len);
 static void apply_cardputer_pending_command_locked(void);
@@ -2596,6 +2624,90 @@ static bool roadscout_sensor_ingest(const char *source, const uint8_t *data, siz
     return handled;
 }
 
+static bruce_line_state_t *bruce_line_state_for_source(const char *source)
+{
+    if (source != NULL && strcmp(source, "grove-uart") == 0) {
+        return &g_bruce_grove_line;
+    }
+    return &g_bruce_usb_line;
+}
+
+static bool bruce_should_capture_line(const char *line)
+{
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    bool recent_command = g_bruce_last_command_ms > 0 &&
+                          now_ms >= g_bruce_last_command_ms &&
+                          (now_ms - g_bruce_last_command_ms) <= TABFORGE_BRUCE_RESPONSE_WINDOW_MS;
+    return g_active_app == APP_BRUCE ||
+           recent_command ||
+           (line != NULL && (strstr(line, "Bruce") != NULL ||
+                             strstr(line, "bruce") != NULL ||
+                             strstr(line, "BRUCE") != NULL));
+}
+
+static bool bruce_handle_line(const char *source, const char *line)
+{
+    if (line == NULL || line[0] == '\0' || !bruce_should_capture_line(line)) {
+        return false;
+    }
+
+    bool first_seen = !g_bruce_seen;
+    g_bruce_seen = true;
+    g_bruce_response_count++;
+    g_bruce_last_response_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    strlcpy(g_bruce_last_source, source != NULL ? source : "serial", sizeof(g_bruce_last_source));
+    strlcpy(g_bruce_last_response, line, sizeof(g_bruce_last_response));
+    snprintf(g_bruce_status,
+             sizeof(g_bruce_status),
+             "Bruce response %lu via %.12s.",
+             (unsigned long)g_bruce_response_count,
+             g_bruce_last_source);
+    if (first_seen) {
+        announce_module_attached("Bruce Cardputer attached", g_bruce_last_source, "bruce_cardputer_detected");
+    }
+    append_event("bruce_serial_rx");
+    request_active_app_refresh();
+    return true;
+}
+
+static bool bruce_serial_ingest(const char *source, const uint8_t *data, size_t data_len)
+{
+    if (data == NULL || data_len == 0U) {
+        return false;
+    }
+
+    bruce_line_state_t *state = bruce_line_state_for_source(source);
+    bool handled = false;
+    for (size_t i = 0; i < data_len; ++i) {
+        char byte = (char)data[i];
+        if (byte == '\r' || byte == '\n') {
+            if (state->length > 0U) {
+                state->line[state->length] = '\0';
+                handled |= bruce_handle_line(source, state->line);
+            }
+            state->length = 0;
+            state->active = false;
+            continue;
+        }
+
+        bool printable = (byte >= 0x20 && byte <= 0x7e) || byte == '\t';
+        if (!printable) {
+            continue;
+        }
+
+        state->active = true;
+        if (state->length < sizeof(state->line) - 1U) {
+            state->line[state->length++] = byte;
+        } else {
+            state->length = 0;
+            state->active = false;
+            g_bruce_parse_errors++;
+        }
+    }
+
+    return handled;
+}
+
 static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_len)
 {
     meshtastic_rx_state_t *rx_state = NULL;
@@ -2615,6 +2727,9 @@ static void mesh_record_rx(const char *source, const uint8_t *data, size_t data_
         return;
     }
     if (cardputer_keyboard_ingest(source, data, data_len)) {
+        return;
+    }
+    if (bruce_serial_ingest(source, data, data_len)) {
         return;
     }
 
@@ -5687,6 +5802,43 @@ static bool usb_cdc_send_bytes(const uint8_t *data, size_t data_len, const char 
     append_event("usb_cdc_tx");
     ESP_LOGI(TABFORGE_TAG, "USB CDC TX: %u bytes (%s)", (unsigned)data_len, label != NULL ? label : "frame");
     return true;
+}
+
+static bool bruce_send_command(const char *command, const char *label)
+{
+    if (command == NULL || command[0] == '\0') {
+        set_activity("Bruce Link", "No Bruce command selected.");
+        return false;
+    }
+
+    if (!g_ext_power_ready) {
+        set_accessory_power(true);
+        start_accessory_probe_tasks();
+    }
+
+    char line[128];
+    snprintf(line, sizeof(line), "%.120s\n", command);
+
+    bool sent = false;
+    if (g_usb_state == USB_STATE_OPEN) {
+        sent |= usb_cdc_send_bytes((const uint8_t *)line, strlen(line), label != NULL ? label : "bruce");
+    }
+    if (g_grove_uart_ready) {
+        grove_uart_send_line(command);
+        sent = true;
+    }
+
+    g_bruce_command_count++;
+    g_bruce_last_command_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    strlcpy(g_bruce_last_command, command, sizeof(g_bruce_last_command));
+    snprintf(g_bruce_status,
+             sizeof(g_bruce_status),
+             sent ? "Sent Bruce command: %.72s" : "No Bruce serial transport. Attach Cardputer USB to Tab or serial bridge.",
+             command);
+    set_activity("Bruce Link", g_bruce_status);
+    append_event(sent ? "bruce_command_tx" : "bruce_command_no_transport");
+    request_active_app_refresh();
+    return sent;
 }
 
 static bool meshtastic_send_config_request(void)
