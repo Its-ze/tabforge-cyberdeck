@@ -10344,8 +10344,6 @@ void app_main(void)
 
     esp_err_t imu_err = init_imu();
     vTaskDelay(pdMS_TO_TICKS(50));
-    init_wifi_station();
-    vTaskDelay(pdMS_TO_TICKS(50));
     esp_err_t ble_err = tabforge_ble_start(tabforge_ble_rx_line, tabforge_ble_link_changed);
     if (ble_err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "TabForge Bluetooth start failed: %s", esp_err_to_name(ble_err));
@@ -10353,6 +10351,8 @@ void app_main(void)
     } else {
         append_event("tabforge_ble_started");
     }
+    vTaskDelay(pdMS_TO_TICKS(50));
+    init_wifi_station();
     vTaskDelay(pdMS_TO_TICKS(50));
     start_companion_api_server();
     if (imu_err != ESP_OK) {
