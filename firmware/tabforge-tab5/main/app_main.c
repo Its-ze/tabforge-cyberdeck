@@ -26,6 +26,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "nvs.h"
@@ -10247,7 +10248,7 @@ static void accessory_auto_power_task(void *arg)
         append_event("accessories_auto_power_on");
         update_activity_from_task("Accessories On", "Add-on power enabled after boot.");
     }
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 static void stats_task(void *arg)
@@ -10368,9 +10369,25 @@ void app_main(void)
 #endif
     }
 
-    xTaskCreate(battery_monitor_task, "tabforge-battery", 4096, NULL, 4, NULL);
-    xTaskCreate(heartbeat_task, "tabforge-heartbeat", 4096, NULL, 5, NULL);
-    xTaskCreate(accessory_auto_power_task, "tabforge-accessory-power", 3072, NULL, 4, NULL);
-    xTaskCreate(stats_task, "tabforge-stats", 6144, NULL, 4, NULL);
-    xTaskCreate(rotation_task, "tabforge-rotate", 4096, NULL, 4, NULL);
+    const UBaseType_t psram_stack_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    if (xTaskCreateWithCaps(battery_monitor_task, "tabforge-battery", 3072, NULL, 4, NULL,
+                            psram_stack_caps) != pdPASS) {
+        ESP_LOGE(TABFORGE_TAG, "battery worker task allocation failed");
+    }
+    if (xTaskCreateWithCaps(heartbeat_task, "tabforge-heartbeat", 3072, NULL, 5, NULL,
+                            psram_stack_caps) != pdPASS) {
+        ESP_LOGE(TABFORGE_TAG, "heartbeat worker task allocation failed");
+    }
+    if (xTaskCreateWithCaps(accessory_auto_power_task, "tabforge-accessory-power", 2048, NULL, 4, NULL,
+                            psram_stack_caps) != pdPASS) {
+        ESP_LOGE(TABFORGE_TAG, "accessory power task allocation failed");
+    }
+    if (xTaskCreateWithCaps(stats_task, "tabforge-stats", 4096, NULL, 4, NULL,
+                            psram_stack_caps) != pdPASS) {
+        ESP_LOGE(TABFORGE_TAG, "stats worker task allocation failed");
+    }
+    if (xTaskCreateWithCaps(rotation_task, "tabforge-rotate", 3072, NULL, 4, NULL,
+                            psram_stack_caps) != pdPASS) {
+        ESP_LOGE(TABFORGE_TAG, "rotation worker task allocation failed");
+    }
 }
