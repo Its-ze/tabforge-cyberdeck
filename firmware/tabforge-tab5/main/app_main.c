@@ -35,6 +35,7 @@
 #include "usb/usb_host.h"
 #include "cJSON.h"
 #include "mbedtls/sha256.h"
+#include "tabforge_ble.h"
 
 #ifndef TABFORGE_VERSION
 #define TABFORGE_VERSION "0.1.0"
@@ -2875,6 +2876,10 @@ static void card_display_send_response(const char *source, const char *state, co
 
     if (cardputer_source_is_usb(source)) {
         (void)usb_cdc_send_bytes((const uint8_t *)packet, strlen(packet), "card display ack");
+    } else if (source != NULL && strcmp(source, "ble") == 0) {
+        size_t len = strlen(packet);
+        if (len > 0U && packet[len - 1U] == '\n') packet[len - 1U] = '\0';
+        tabforge_ble_set_response(packet);
     } else {
         char line[224];
         strlcpy(line, packet, sizeof(line));
@@ -3068,6 +3073,20 @@ static bool cardputer_handle_json_line(const char *source, const char *line)
                        strcmp(tabforge, "cardputer.keyboard") == 0 ||
                        (strcmp(device, "cardputer") == 0 && has_input);
     if (is_keyboard) {
+        bool ble_authorized = source == NULL || strcmp(source, "ble") != 0 ||
+                              (g_card_display_paired && strcmp(g_card_display_source, "ble") == 0);
+        if (!ble_authorized) {
+            card_display_ensure_pair_code();
+            snprintf(g_card_display_status,
+                     sizeof(g_card_display_status),
+                     "Bluetooth keyboard blocked. Enter code %.7s on Cardputer.",
+                     g_card_display_pair_code);
+            card_display_send_response("ble", "pair_required", "Authorize the Bluetooth keyboard first.");
+            append_event("cardputer_ble_key_blocked");
+            request_active_app_refresh();
+            cJSON_Delete(root);
+            return true;
+        }
         cardputer_mark_seen(source);
         g_cardputer_key_count++;
         strlcpy(g_cardputer_last_key, text[0] != '\0' ? text : (key[0] != '\0' ? key : "key"), sizeof(g_cardputer_last_key));
@@ -3085,6 +3104,34 @@ static bool cardputer_handle_json_line(const char *source, const char *line)
 
     cJSON_Delete(root);
     return is_keyboard;
+}
+
+static bool tabforge_ble_rx_line(const char *line)
+{
+    return cardputer_handle_json_line("ble", line);
+}
+
+static void tabforge_ble_link_changed(bool connected)
+{
+    card_display_ensure_pair_code();
+    if (connected) {
+        snprintf(g_card_display_status,
+                 sizeof(g_card_display_status),
+                 "Cardputer Bluetooth detected. Enter code %.7s to authorize.",
+                 g_card_display_pair_code);
+        strlcpy(g_card_display_source, "ble", sizeof(g_card_display_source));
+        announce_module_attached("Cardputer Bluetooth detected", "Open Card Display to pair", "cardputer_ble_detected");
+        update_activity_from_task("Card Display", g_card_display_status);
+    } else if (strcmp(g_card_display_source, "ble") == 0) {
+        g_card_display_paired = false;
+        strlcpy(g_card_display_body,
+                "Bluetooth direct session ended. Pair again when the Cardputer reconnects.",
+                sizeof(g_card_display_body));
+        strlcpy(g_card_display_status, "Cardputer Bluetooth disconnected.", sizeof(g_card_display_status));
+        update_activity_from_task("Card Display", g_card_display_status);
+        append_event("cardputer_ble_disconnected");
+    }
+    request_active_app_refresh();
 }
 
 static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, size_t data_len)
@@ -10298,6 +10345,14 @@ void app_main(void)
     esp_err_t imu_err = init_imu();
     vTaskDelay(pdMS_TO_TICKS(50));
     init_wifi_station();
+    vTaskDelay(pdMS_TO_TICKS(50));
+    esp_err_t ble_err = tabforge_ble_start(tabforge_ble_rx_line, tabforge_ble_link_changed);
+    if (ble_err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "TabForge Bluetooth start failed: %s", esp_err_to_name(ble_err));
+        append_event("tabforge_ble_start_failed");
+    } else {
+        append_event("tabforge_ble_started");
+    }
     vTaskDelay(pdMS_TO_TICKS(50));
     start_companion_api_server();
     if (imu_err != ESP_OK) {

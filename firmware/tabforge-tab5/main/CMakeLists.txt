@@ -1,10 +1,12 @@
 idf_component_register(
     SRCS
         "app_main.c"
+        "tabforge_ble.c"
     INCLUDE_DIRS
         "."
     REQUIRES
         app_update
+        bt
         esp_http_client
         esp_http_server
         esp-tls
@@ -17,6 +19,7 @@ idf_component_register(
         esp_timer
         fatfs
         heap
+        esp_hosted
         json
         mbedtls
         m5stack_tab5
