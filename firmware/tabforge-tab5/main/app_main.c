@@ -10344,8 +10344,12 @@ void app_main(void)
 
     esp_err_t imu_err = init_imu();
     vTaskDelay(pdMS_TO_TICKS(50));
-    xTaskCreate(usb_cdc_task, "tabforge-usb-cdc", 8192, NULL, 6, NULL);
-    xTaskCreate(sdr_usb_monitor_task, "tabforge-sdr-usb", 6144, NULL, 5, NULL);
+    if (xTaskCreate(usb_cdc_task, "tabforge-usb-cdc", 4096, NULL, 6, NULL) != pdPASS) {
+        ESP_LOGE(TABFORGE_TAG, "USB CDC worker task allocation failed");
+    }
+    if (xTaskCreate(sdr_usb_monitor_task, "tabforge-sdr-usb", 4096, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TABFORGE_TAG, "SDR monitor task allocation failed");
+    }
     vTaskDelay(pdMS_TO_TICKS(50));
     esp_err_t ble_err = tabforge_ble_start(tabforge_ble_rx_line, tabforge_ble_link_changed);
     if (ble_err != ESP_OK) {
