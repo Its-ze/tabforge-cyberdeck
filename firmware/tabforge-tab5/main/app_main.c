@@ -10094,12 +10094,6 @@ static void usb_cdc_task(void *arg)
 {
     (void)arg;
 
-    while (!g_usb_power_ready) {
-        g_usb_state = USB_STATE_OFF;
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-
-    g_usb_state = USB_STATE_POWERED;
     esp_err_t err = bsp_usb_host_start(BSP_USB_HOST_POWER_MODE_USB_DEV, true);
     if (err != ESP_OK) {
         g_usb_last_error = err;
@@ -10121,6 +10115,12 @@ static void usb_cdc_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
+
+    while (!g_usb_power_ready) {
+        g_usb_state = USB_STATE_OFF;
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    g_usb_state = USB_STATE_POWERED;
 
     while (true) {
         if (!g_usb_power_ready) {
@@ -10344,6 +10344,9 @@ void app_main(void)
 
     esp_err_t imu_err = init_imu();
     vTaskDelay(pdMS_TO_TICKS(50));
+    xTaskCreate(usb_cdc_task, "tabforge-usb-cdc", 8192, NULL, 6, NULL);
+    xTaskCreate(sdr_usb_monitor_task, "tabforge-sdr-usb", 6144, NULL, 5, NULL);
+    vTaskDelay(pdMS_TO_TICKS(50));
     esp_err_t ble_err = tabforge_ble_start(tabforge_ble_rx_line, tabforge_ble_link_changed);
     if (ble_err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "TabForge Bluetooth start failed: %s", esp_err_to_name(ble_err));
@@ -10364,8 +10367,6 @@ void app_main(void)
     xTaskCreate(battery_monitor_task, "tabforge-battery", 4096, NULL, 4, NULL);
     xTaskCreate(heartbeat_task, "tabforge-heartbeat", 4096, NULL, 5, NULL);
     xTaskCreate(accessory_auto_power_task, "tabforge-accessory-power", 3072, NULL, 4, NULL);
-    xTaskCreate(usb_cdc_task, "tabforge-usb-cdc", 8192, NULL, 6, NULL);
-    xTaskCreate(sdr_usb_monitor_task, "tabforge-sdr-usb", 6144, NULL, 5, NULL);
     xTaskCreate(stats_task, "tabforge-stats", 6144, NULL, 4, NULL);
     xTaskCreate(rotation_task, "tabforge-rotate", 4096, NULL, 4, NULL);
 }
