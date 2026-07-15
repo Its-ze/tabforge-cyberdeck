@@ -2870,10 +2870,9 @@ static void card_display_send_response(const char *source, const char *state, co
     char packet[224];
     snprintf(packet,
              sizeof(packet),
-             "{\"tabforge\":\"card.display.ack\",\"state\":\"%.24s\",\"detail\":\"%.96s\",\"code\":\"%.7s\"}\n",
+             "{\"tabforge\":\"card.display.ack\",\"state\":\"%.24s\",\"detail\":\"%.96s\"}\n",
              state != NULL ? state : "ok",
-             detail != NULL ? detail : "",
-             g_card_display_pair_code);
+             detail != NULL ? detail : "");
 
     if (cardputer_source_is_usb(source)) {
         (void)usb_cdc_send_bytes((const uint8_t *)packet, strlen(packet), "card display ack");
