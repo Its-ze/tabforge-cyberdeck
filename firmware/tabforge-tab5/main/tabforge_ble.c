@@ -281,13 +281,17 @@ esp_err_t tabforge_ble_start(tabforge_ble_rx_cb_t rx_cb, tabforge_ble_link_cb_t 
     }
     err = esp_hosted_bt_controller_init();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Hosted Bluetooth controller init failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    err = esp_hosted_bt_controller_enable();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Hosted Bluetooth controller enable failed: %s", esp_err_to_name(err));
-        return err;
+        /* M5Stack's factory C6 image predates hosted feature-control RPCs and
+         * starts its controller during co-processor boot. HCI remains usable. */
+        ESP_LOGW(TAG,
+                 "Hosted controller feature control unavailable (%s); using legacy C6 HCI",
+                 esp_err_to_name(err));
+    } else {
+        err = esp_hosted_bt_controller_enable();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Hosted Bluetooth controller enable failed: %s", esp_err_to_name(err));
+            return err;
+        }
     }
     err = nimble_port_init();
     if (err != ESP_OK) {
