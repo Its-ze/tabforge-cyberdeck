@@ -147,7 +147,6 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             s_connections++;
             portEXIT_CRITICAL(&s_lock);
             queue_link_event(TF_BLE_EVENT_CONNECTED);
-            (void)ble_gap_security_initiate(event->connect.conn_handle);
             ESP_LOGI(TAG, "Cardputer BLE link connected handle=%u", event->connect.conn_handle);
         } else {
             ESP_LOGW(TAG, "BLE connection failed status=%d", event->connect.status);
