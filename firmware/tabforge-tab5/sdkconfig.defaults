@@ -47,6 +47,10 @@ CONFIG_FATFS_LONG_FILENAMES=y
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_USE_LABEL=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# The full tablet dashboard and rotation rebuild can hold the LVGL lock for
+# roughly nine seconds on Tab5. Keep the watchdog enabled with enough margin
+# for that known-good render path.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=1024
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=1536
