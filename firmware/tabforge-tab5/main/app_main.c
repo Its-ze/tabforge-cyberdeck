@@ -108,7 +108,8 @@
 #define TABFORGE_ROADSCOUT_LOG_PATH TABFORGE_SD_ROOT "/tabforge/roadscout/points.jsonl"
 #define TABFORGE_MANIFEST_URL "https://its-ze.github.io/tabforge-cyberdeck/manifest.json"
 #define TABFORGE_APP_STORE_URL "https://its-ze.github.io/tabforge-cyberdeck/app-store.json"
-#define TABFORGE_MOBILE_BASE_URL "http://192.168.50.35:8788"
+#define TABFORGE_MOBILE_BASE_DEFAULT_URL "http://192.168.50.35:8788"
+#define TABFORGE_MOBILE_BASE_URL_LEN 112
 #define TABFORGE_MOBILE_BASE_STATUS_LEN 128
 #define TABFORGE_MOBILE_BASE_KEY_LEN 96
 #define TABFORGE_MOBILE_BASE_PAIR_LEN 9
@@ -849,6 +850,7 @@ static char g_mobile_base_sensors[112] = "ESP32 sensors have not been checked.";
 static char g_mobile_base_status[TABFORGE_MOBILE_BASE_STATUS_LEN] = "Connect TabForge to the Mobile Base field LAN.";
 static char g_mobile_base_control_key[TABFORGE_MOBILE_BASE_KEY_LEN] = "";
 static char g_mobile_base_pair_code[TABFORGE_MOBILE_BASE_PAIR_LEN] = "";
+static char g_mobile_base_url[TABFORGE_MOBILE_BASE_URL_LEN] = TABFORGE_MOBILE_BASE_DEFAULT_URL;
 static uint32_t g_mobile_base_last_poll_ms;
 typedef enum {
     MOBILE_BASE_ACTION_NONE = 0,
@@ -1630,7 +1632,7 @@ static void write_default_config_if_missing(void)
             "  },\n"
             "  \"ota\": { \"manifestUrl\": \"%s\", \"requireButtonConfirm\": true }\n"
             "}\n",
-            TABFORGE_MOBILE_BASE_URL,
+            TABFORGE_MOBILE_BASE_DEFAULT_URL,
             TABFORGE_APP_STORE_URL,
             TABFORGE_MANIFEST_URL);
     fclose(f);
@@ -1775,6 +1777,17 @@ static void load_runtime_config(void)
     cJSON *app_store = cJSON_GetObjectItemCaseSensitive(root, "appStore");
     if (cJSON_IsObject(app_store)) {
         copy_json_string(app_store, "manifestUrl", g_app_store_manifest_url, sizeof(g_app_store_manifest_url));
+    }
+
+    cJSON *mobile_base = cJSON_GetObjectItemCaseSensitive(root, "mobileBase");
+    if (cJSON_IsObject(mobile_base)) {
+        char configured_url[TABFORGE_MOBILE_BASE_URL_LEN] = "";
+        copy_json_string(mobile_base, "apiUrl", configured_url, sizeof(configured_url));
+        if (strncmp(configured_url, "http://", 7) == 0 || strncmp(configured_url, "https://", 8) == 0) {
+            size_t len = strlen(configured_url);
+            while (len > 0 && configured_url[len - 1] == '/') configured_url[--len] = '\0';
+            strlcpy(g_mobile_base_url, configured_url, sizeof(g_mobile_base_url));
+        }
     }
 
     cJSON_Delete(root);
@@ -4383,7 +4396,7 @@ static void mobile_base_refresh_task(void *arg)
     }
 
     char url[160];
-    snprintf(url, sizeof(url), "%s/api/health", TABFORGE_MOBILE_BASE_URL);
+    snprintf(url, sizeof(url), "%s/api/health", g_mobile_base_url);
     esp_err_t err = http_get_to_buffer(url, buffer, 8192);
     if (err != ESP_OK) {
         snprintf(g_mobile_base_status, sizeof(g_mobile_base_status), "Pi API unavailable: %s", esp_err_to_name(err));
@@ -4424,7 +4437,7 @@ static void mobile_base_refresh_task(void *arg)
     cJSON_Delete(root);
     root = NULL;
 
-    snprintf(url, sizeof(url), "%s/api/sensors/status", TABFORGE_MOBILE_BASE_URL);
+    snprintf(url, sizeof(url), "%s/api/sensors/status", g_mobile_base_url);
     err = http_get_to_buffer(url, buffer, 8192);
     if (err == ESP_OK) {
         root = cJSON_Parse(buffer);
@@ -4444,7 +4457,7 @@ static void mobile_base_refresh_task(void *arg)
         root = NULL;
     }
 
-    snprintf(url, sizeof(url), "%s/api/workers", TABFORGE_MOBILE_BASE_URL);
+    snprintf(url, sizeof(url), "%s/api/workers", g_mobile_base_url);
     err = http_get_to_buffer(url, buffer, 8192);
     if (err == ESP_OK) {
         root = cJSON_Parse(buffer);
@@ -4467,7 +4480,7 @@ static void mobile_base_refresh_task(void *arg)
         cJSON_Delete(root);
     }
 
-    snprintf(url, sizeof(url), "%s/api/events?event_type=gps.position&limit=1", TABFORGE_MOBILE_BASE_URL);
+    snprintf(url, sizeof(url), "%s/api/events?event_type=gps.position&limit=1", g_mobile_base_url);
     err = http_get_to_buffer(url, buffer, 8192);
     if (err == ESP_OK) {
         root = cJSON_Parse(buffer);
@@ -4492,7 +4505,7 @@ static void mobile_base_refresh_task(void *arg)
     snprintf(g_mobile_base_status,
              sizeof(g_mobile_base_status),
              "Connected to %s | API v%s",
-             TABFORGE_MOBILE_BASE_URL,
+             g_mobile_base_url,
              g_mobile_base_version);
     g_mobile_base_refreshing = false;
     update_activity_from_task("Mobile Base", g_mobile_base_status);
@@ -4508,7 +4521,7 @@ static void mobile_base_pair_task(void *arg)
     char payload[160];
     char url[160];
     snprintf(payload, sizeof(payload), "{\"pairing_code\":\"%.8s\",\"device_name\":\"TabForge Tab5\"}", g_mobile_base_pair_code);
-    snprintf(url, sizeof(url), "%s/api/controller/pair", TABFORGE_MOBILE_BASE_URL);
+    snprintf(url, sizeof(url), "%s/api/controller/pair", g_mobile_base_url);
     esp_err_t err = http_post_json(url, payload, NULL, response, sizeof(response));
     if (err == ESP_OK) {
         cJSON *root = cJSON_Parse(response);
@@ -4543,7 +4556,7 @@ static void mobile_base_control_task(void *arg)
     const char *label = "control";
     switch (action) {
     case MOBILE_BASE_ACTION_START_MISSION:
-        snprintf(url, sizeof(url), "%s/api/missions", TABFORGE_MOBILE_BASE_URL);
+        snprintf(url, sizeof(url), "%s/api/missions", g_mobile_base_url);
         payload = "{\"name\":\"Tab5 Field Mission\",\"operator\":\"TabForge Tab5\"}";
         label = "start mission";
         break;
@@ -4555,19 +4568,19 @@ static void mobile_base_control_task(void *arg)
             vTaskDelete(NULL);
             return;
         }
-        snprintf(url, sizeof(url), "%s/api/missions/%s/end", TABFORGE_MOBILE_BASE_URL, g_mobile_base_mission_id);
+        snprintf(url, sizeof(url), "%s/api/missions/%s/end", g_mobile_base_url, g_mobile_base_mission_id);
         label = "end mission";
         break;
     case MOBILE_BASE_ACTION_RESCAN:
-        snprintf(url, sizeof(url), "%s/api/sensors/rescan", TABFORGE_MOBILE_BASE_URL);
+        snprintf(url, sizeof(url), "%s/api/sensors/rescan", g_mobile_base_url);
         label = "rescan sensors";
         break;
     case MOBILE_BASE_ACTION_WIFI_SCAN:
-        snprintf(url, sizeof(url), "%s/api/sensors/wifi_survey/scan", TABFORGE_MOBILE_BASE_URL);
+        snprintf(url, sizeof(url), "%s/api/sensors/wifi_survey/scan", g_mobile_base_url);
         label = "Wi-Fi scan";
         break;
     case MOBILE_BASE_ACTION_SENSOR_SAMPLE:
-        snprintf(url, sizeof(url), "%s/api/sensors/sensor_controller/sample", TABFORGE_MOBILE_BASE_URL);
+        snprintf(url, sizeof(url), "%s/api/sensors/sensor_controller/sample", g_mobile_base_url);
         label = "sensor sample";
         break;
     default:
