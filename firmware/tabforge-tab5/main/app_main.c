@@ -108,6 +108,8 @@
 #define TABFORGE_ROADSCOUT_LOG_PATH TABFORGE_SD_ROOT "/tabforge/roadscout/points.jsonl"
 #define TABFORGE_MANIFEST_URL "https://its-ze.github.io/tabforge-cyberdeck/manifest.json"
 #define TABFORGE_APP_STORE_URL "https://its-ze.github.io/tabforge-cyberdeck/app-store.json"
+#define TABFORGE_MOBILE_BASE_URL "http://192.168.50.35:8788"
+#define TABFORGE_MOBILE_BASE_STATUS_LEN 128
 #define TABFORGE_APP_STORE_PATH TABFORGE_SD_ROOT "/tabforge/apps/store.json"
 #define TABFORGE_APP_INSTALLED_INDEX_PATH TABFORGE_SD_ROOT "/tabforge/apps/installed.jsonl"
 
@@ -236,6 +238,7 @@ typedef enum {
     APP_SDR,
     APP_ROADSCOUT,
     APP_WARDRIVE,
+    APP_MOBILE_BASE,
     APP_CARDPUTER,
     APP_CARD_DISPLAY,
     APP_BRUCE,
@@ -509,6 +512,7 @@ static const feature_tile_t g_tiles[] = {
     {LV_SYMBOL_TUNING, "SDR", "RTL-SDR USB receiver detection and field presets.", "RTL", "tile_sdr", APP_SDR, FEATURE_ACTIVE, 0x69d2e7},
     {LV_SYMBOL_MAP, "Road Scout", "On-device RoadLens field app with phone or USB GPS and sensor control.", "Scout", "tile_roadscout", APP_ROADSCOUT, FEATURE_ACTIVE, 0xffc857},
     {LV_SYMBOL_DIRECTORY, "Wardrive", "GPS-stamped Wi-Fi survey logging using Tab scans and attached GPS.", "Survey", "tile_wardrive", APP_WARDRIVE, FEATURE_ACTIVE, 0x77dd88},
+    {LV_SYMBOL_HOME, "Mobile Base", "Live Pi mission, GPS, sensors, and field-system readiness over the local network.", "Pi Link", "tile_mobile_base", APP_MOBILE_BASE, FEATURE_ACTIVE, 0x22d3ee},
     {LV_SYMBOL_KEYBOARD, "Cardputer", "Grove or USB-C keyboard controller for TabForge text entry.", "Keys", "tile_cardputer", APP_CARDPUTER, FEATURE_ACTIVE, 0xf0bf4f},
     {LV_SYMBOL_KEYBOARD, "Card Display", "Use the Tab5 as a paired external display and helper processor for the Cardputer.", "Remote", "tile_card_display", APP_CARD_DISPLAY, FEATURE_ACTIVE, 0x22d3ee},
     {LV_SYMBOL_TERMINAL, "Bruce Link", "Keep Bruce on the Cardputer and control it over serial/WebUI commands.", "Bruce", "tile_bruce", APP_BRUCE, FEATURE_ACTIVE, 0x65f4c8},
@@ -826,6 +830,15 @@ static wifi_ap_record_t g_wifi_aps[TABFORGE_WIFI_MAX_APS];
 static uint16_t g_wifi_ap_count;
 static uint16_t g_wifi_selected_ap;
 static char g_wifi_ip[16] = "--";
+static bool g_mobile_base_refreshing;
+static bool g_mobile_base_online;
+static uint32_t g_mobile_base_worker_count;
+static uint32_t g_mobile_base_online_workers;
+static char g_mobile_base_version[24] = "unknown";
+static char g_mobile_base_mission[96] = "Waiting for Mobile Base.";
+static char g_mobile_base_gps[96] = "No GPS position received yet.";
+static char g_mobile_base_workers[96] = "Workers have not been checked.";
+static char g_mobile_base_status[TABFORGE_MOBILE_BASE_STATUS_LEN] = "Connect TabForge to the Mobile Base field LAN.";
 static char g_ota_manifest_url[256] = TABFORGE_MANIFEST_URL;
 static char g_ota_firmware_url[256] = "";
 static char g_ota_version[32] = "";
@@ -863,6 +876,7 @@ static int compare_versions(const char *left, const char *right);
 static void sdr_request_scan(const char *reason);
 static void wifi_scan_task(void *arg);
 static void start_mic_monitor(const char *reason);
+static void mobile_base_refresh_task(void *arg);
 static void append_event(const char *event);
 static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, size_t data_len);
 static bool cardputer_keyboard_present(void);
@@ -3972,6 +3986,8 @@ static void feature_tile_event_cb(lv_event_t *event)
         refresh_mode_widgets();
     } else if (g_active_app == APP_RECORDER) {
         start_mic_monitor("recorder_app");
+    } else if (g_active_app == APP_MOBILE_BASE && !g_mobile_base_refreshing) {
+        xTaskCreate(mobile_base_refresh_task, "tabforge-mobile-base", 8192, NULL, 5, NULL);
     }
     show_nav_page(NAV_PAGE_APP);
     append_event(tile->event_name);
@@ -4251,6 +4267,123 @@ static esp_err_t http_get_to_buffer(const char *url, char *buffer, size_t buffer
         return err;
     }
     return (status >= 200 && status < 300) ? ESP_OK : ESP_FAIL;
+}
+
+static void mobile_base_refresh_task(void *arg)
+{
+    (void)arg;
+    g_mobile_base_refreshing = true;
+    g_mobile_base_online = false;
+    strlcpy(g_mobile_base_status, "Contacting Mobile Base...", sizeof(g_mobile_base_status));
+    request_active_app_refresh();
+
+    if (!g_wifi_has_ip) {
+        strlcpy(g_mobile_base_status, "Connect Wi-Fi to the same field LAN as the Pi.", sizeof(g_mobile_base_status));
+        g_mobile_base_refreshing = false;
+        request_active_app_refresh();
+        vTaskDelete(NULL);
+        return;
+    }
+
+    char *buffer = tabforge_alloc_json_buffer(8192, "Mobile Base API");
+    if (buffer == NULL) {
+        strlcpy(g_mobile_base_status, "Not enough memory for Mobile Base status.", sizeof(g_mobile_base_status));
+        g_mobile_base_refreshing = false;
+        request_active_app_refresh();
+        vTaskDelete(NULL);
+        return;
+    }
+
+    char url[160];
+    snprintf(url, sizeof(url), "%s/api/health", TABFORGE_MOBILE_BASE_URL);
+    esp_err_t err = http_get_to_buffer(url, buffer, 8192);
+    if (err != ESP_OK) {
+        snprintf(g_mobile_base_status, sizeof(g_mobile_base_status), "Pi API unavailable: %s", esp_err_to_name(err));
+        heap_caps_free(buffer);
+        g_mobile_base_refreshing = false;
+        request_active_app_refresh();
+        vTaskDelete(NULL);
+        return;
+    }
+
+    cJSON *root = cJSON_Parse(buffer);
+    if (root == NULL) {
+        strlcpy(g_mobile_base_status, "Pi returned invalid health data.", sizeof(g_mobile_base_status));
+        heap_caps_free(buffer);
+        g_mobile_base_refreshing = false;
+        request_active_app_refresh();
+        vTaskDelete(NULL);
+        return;
+    }
+    const cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
+    const cJSON *mission = cJSON_GetObjectItemCaseSensitive(root, "active_mission");
+    if (cJSON_IsString(version) && version->valuestring != NULL) {
+        strlcpy(g_mobile_base_version, version->valuestring, sizeof(g_mobile_base_version));
+    }
+    if (cJSON_IsObject(mission)) {
+        const cJSON *name = cJSON_GetObjectItemCaseSensitive(mission, "name");
+        strlcpy(g_mobile_base_mission,
+                cJSON_IsString(name) && name->valuestring != NULL ? name->valuestring : "Active field mission",
+                sizeof(g_mobile_base_mission));
+    } else {
+        strlcpy(g_mobile_base_mission, "No active mission.", sizeof(g_mobile_base_mission));
+    }
+    cJSON_Delete(root);
+
+    snprintf(url, sizeof(url), "%s/api/workers", TABFORGE_MOBILE_BASE_URL);
+    err = http_get_to_buffer(url, buffer, 8192);
+    if (err == ESP_OK) {
+        root = cJSON_Parse(buffer);
+        if (cJSON_IsArray(root)) {
+            g_mobile_base_worker_count = (uint32_t)cJSON_GetArraySize(root);
+            g_mobile_base_online_workers = 0;
+            const cJSON *worker = NULL;
+            cJSON_ArrayForEach(worker, root) {
+                const cJSON *status = cJSON_GetObjectItemCaseSensitive(worker, "status");
+                if (cJSON_IsString(status) && strcmp(status->valuestring, "online") == 0) {
+                    g_mobile_base_online_workers++;
+                }
+            }
+            snprintf(g_mobile_base_workers,
+                     sizeof(g_mobile_base_workers),
+                     "%lu/%lu workers online",
+                     (unsigned long)g_mobile_base_online_workers,
+                     (unsigned long)g_mobile_base_worker_count);
+        }
+        cJSON_Delete(root);
+    }
+
+    snprintf(url, sizeof(url), "%s/api/events?event_type=gps.position&limit=1", TABFORGE_MOBILE_BASE_URL);
+    err = http_get_to_buffer(url, buffer, 8192);
+    if (err == ESP_OK) {
+        root = cJSON_Parse(buffer);
+        const cJSON *event = cJSON_IsArray(root) ? cJSON_GetArrayItem(root, 0) : NULL;
+        const cJSON *latitude = event != NULL ? cJSON_GetObjectItemCaseSensitive(event, "latitude") : NULL;
+        const cJSON *longitude = event != NULL ? cJSON_GetObjectItemCaseSensitive(event, "longitude") : NULL;
+        if (cJSON_IsNumber(latitude) && cJSON_IsNumber(longitude)) {
+            snprintf(g_mobile_base_gps,
+                     sizeof(g_mobile_base_gps),
+                     "%.6f, %.6f",
+                     latitude->valuedouble,
+                     longitude->valuedouble);
+        } else {
+            strlcpy(g_mobile_base_gps, "Receiver online; waiting for satellite fix.", sizeof(g_mobile_base_gps));
+        }
+        cJSON_Delete(root);
+    }
+
+    heap_caps_free(buffer);
+    g_mobile_base_online = true;
+    snprintf(g_mobile_base_status,
+             sizeof(g_mobile_base_status),
+             "Connected to %s | API v%s",
+             TABFORGE_MOBILE_BASE_URL,
+             g_mobile_base_version);
+    g_mobile_base_refreshing = false;
+    update_activity_from_task("Mobile Base", g_mobile_base_status);
+    append_event("mobile_base_refreshed");
+    request_active_app_refresh();
+    vTaskDelete(NULL);
 }
 
 static int hex_value(char value)
@@ -5807,6 +5940,14 @@ static void grove_uart_send_line(const char *line)
     strlcpy(g_grove_last_tx, line, sizeof(g_grove_last_tx));
     append_event("grove_uart_tx");
     ESP_LOGI(TABFORGE_TAG, "Grove UART TX: %s", line);
+}
+
+static void mobile_base_refresh_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED || g_mobile_base_refreshing) {
+        return;
+    }
+    xTaskCreate(mobile_base_refresh_task, "tabforge-mobile-base", 8192, NULL, 5, NULL);
 }
 
 static bool grove_uart_send_bytes(const uint8_t *data, size_t data_len, const char *label)
@@ -7372,6 +7513,7 @@ static app_id_t cardputer_app_from_name(const char *app)
     if (strcmp(app, "sdr") == 0) return APP_SDR;
     if (strcmp(app, "roadscout") == 0 || strcmp(app, "road-scout") == 0 || strcmp(app, "roadlens") == 0) return APP_ROADSCOUT;
     if (strcmp(app, "wardrive") == 0 || strcmp(app, "war-drive") == 0 || strcmp(app, "survey") == 0) return APP_WARDRIVE;
+    if (strcmp(app, "mobile-base") == 0 || strcmp(app, "mobilebase") == 0 || strcmp(app, "base") == 0) return APP_MOBILE_BASE;
     if (strcmp(app, "cardputer") == 0 || strcmp(app, "keyboard") == 0) return APP_CARDPUTER;
     if (strcmp(app, "card-display") == 0 || strcmp(app, "display") == 0 || strcmp(app, "remote-display") == 0) return APP_CARD_DISPLAY;
     if (strcmp(app, "bruce") == 0 || strcmp(app, "bruce-link") == 0 || strcmp(app, "bruce-control") == 0) return APP_BRUCE;
@@ -8017,7 +8159,7 @@ static void build_home_page(lv_obj_t *parent, lv_coord_t width, lv_coord_t heigh
     add_home_nav_shortcut(parent, LV_SYMBOL_SETTINGS, "Settings", "Display + power", 0x61d5f0, tile_w, tile_h, settings_button_event_cb);
     add_home_app_shortcut(parent, find_tile_by_app(APP_MESHTASTIC), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_MESHCORE), tile_w, tile_h);
-    add_home_app_shortcut(parent, find_tile_by_app(APP_BRUCE), tile_w, tile_h);
+    add_home_app_shortcut(parent, find_tile_by_app(APP_MOBILE_BASE), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_CARDPUTER), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_ROADSCOUT), tile_w, tile_h);
     add_home_app_shortcut(parent, find_tile_by_app(APP_WARDRIVE), tile_w, tile_h);
@@ -8564,6 +8706,7 @@ static void add_app_actions(lv_obj_t *parent,
     } else if (app_id == APP_MESHCORE || app_id == APP_TDECK || app_id == APP_RECORDER ||
                app_id == APP_USB || app_id == APP_IR || app_id == APP_SDR ||
                app_id == APP_ROADSCOUT || app_id == APP_WARDRIVE ||
+               app_id == APP_MOBILE_BASE ||
                app_id == APP_CARDPUTER || app_id == APP_CARD_DISPLAY || app_id == APP_BRUCE ||
                app_id == APP_FILES || app_id == APP_STORE) {
         action_h = landscape ? 150 : 348;
@@ -8572,6 +8715,7 @@ static void add_app_actions(lv_obj_t *parent,
     if (app_id == APP_MESSAGES || app_id == APP_MESHTASTIC || app_id == APP_MESHCORE || app_id == APP_TDECK ||
         app_id == APP_RECORDER || app_id == APP_USB || app_id == APP_IR ||
         app_id == APP_SDR || app_id == APP_ROADSCOUT || app_id == APP_WARDRIVE ||
+        app_id == APP_MOBILE_BASE ||
         app_id == APP_CARDPUTER || app_id == APP_CARD_DISPLAY || app_id == APP_BRUCE ||
         app_id == APP_FILES || app_id == APP_STORE) {
         lv_obj_add_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
@@ -8673,6 +8817,10 @@ static void add_app_actions(lv_obj_t *parent,
         make_button(actions, button_w, "Log Point", wardrive_log_button_event_cb);
         make_button(actions, button_w, "Road Scout", roadscout_probe_button_event_cb);
         make_button(actions, button_w, "Accessories", accessory_power_button_event_cb);
+        break;
+    case APP_MOBILE_BASE:
+        make_button(actions, button_w, "Refresh", mobile_base_refresh_button_event_cb);
+        make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
         break;
     case APP_CARDPUTER:
         make_button(actions, button_w, "Power Link", cardputer_power_button_event_cb);
@@ -8950,6 +9098,20 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Status", g_wardrive_status, width - 32, 0x93a6ad);
         break;
     }
+    case APP_MOBILE_BASE:
+        snprintf(line_a,
+                 sizeof(line_a),
+                 "%s | %s",
+                 g_mobile_base_online ? "online" : (g_mobile_base_refreshing ? "connecting" : "offline"),
+                 g_mobile_base_workers);
+        snprintf(line_b, sizeof(line_b), "Mission %.96s", g_mobile_base_mission);
+        snprintf(line_c, sizeof(line_c), "GPS %.96s", g_mobile_base_gps);
+        add_app_status_line(card, "Pi Link", line_a, width - 32, g_mobile_base_online ? 0x77dd88 : 0xffc857);
+        add_app_status_line(card, "Mission", line_b, width - 32, 0x22d3ee);
+        add_app_status_line(card, "Position", line_c, width - 32, 0x6ee7a2);
+        add_app_status_line(card, "Status", g_mobile_base_status, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Control", "Mobile Base auto-starts recording; full dashboard and SSH stay on the Pi LAN.", width - 32, 0x93a6ad);
+        break;
     case APP_CARDPUTER: {
         uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
         uint64_t age_s = g_cardputer_last_rx_ms > 0 ? (now_ms - g_cardputer_last_rx_ms) / 1000ULL : 0;
