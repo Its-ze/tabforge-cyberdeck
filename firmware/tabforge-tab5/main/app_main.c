@@ -4421,6 +4421,8 @@ static void mobile_base_refresh_task(void *arg)
         strlcpy(g_mobile_base_mission, "No active mission.", sizeof(g_mobile_base_mission));
         g_mobile_base_mission_id[0] = '\0';
     }
+    cJSON_Delete(root);
+    root = NULL;
 
     snprintf(url, sizeof(url), "%s/api/sensors/status", TABFORGE_MOBILE_BASE_URL);
     err = http_get_to_buffer(url, buffer, 8192);
@@ -4439,8 +4441,8 @@ static void mobile_base_refresh_task(void *arg)
             snprintf(g_mobile_base_sensors, sizeof(g_mobile_base_sensors), "%u ESP32 ready | %u attention", ready, errors);
         }
         cJSON_Delete(root);
+        root = NULL;
     }
-    cJSON_Delete(root);
 
     snprintf(url, sizeof(url), "%s/api/workers", TABFORGE_MOBILE_BASE_URL);
     err = http_get_to_buffer(url, buffer, 8192);
