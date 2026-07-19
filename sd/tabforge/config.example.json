@@ -9,6 +9,10 @@
     "password": "",
     "autoConnect": false
   },
+  "mobileBase": {
+    "apiUrl": "http://192.168.50.35:8788",
+    "pairOnDevice": true
+  },
   "mesh": {
     "defaultChannel": 0,
     "gpsShare": false,

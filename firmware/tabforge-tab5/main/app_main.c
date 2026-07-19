@@ -110,6 +110,8 @@
 #define TABFORGE_APP_STORE_URL "https://its-ze.github.io/tabforge-cyberdeck/app-store.json"
 #define TABFORGE_MOBILE_BASE_URL "http://192.168.50.35:8788"
 #define TABFORGE_MOBILE_BASE_STATUS_LEN 128
+#define TABFORGE_MOBILE_BASE_KEY_LEN 96
+#define TABFORGE_MOBILE_BASE_PAIR_LEN 9
 #define TABFORGE_APP_STORE_PATH TABFORGE_SD_ROOT "/tabforge/apps/store.json"
 #define TABFORGE_APP_INSTALLED_INDEX_PATH TABFORGE_SD_ROOT "/tabforge/apps/installed.jsonl"
 
@@ -156,6 +158,7 @@
 #define TABFORGE_NVS_SCREEN_TIMEOUT_KEY "scr_to_idx"
 #define TABFORGE_NVS_WIFI_SSID_KEY "wifi_ssid"
 #define TABFORGE_NVS_WIFI_PASS_KEY "wifi_pass"
+#define TABFORGE_NVS_MOBILE_BASE_KEY "mb_ctrl_key"
 #define TABFORGE_SCREEN_WAKE_GRACE_MS 2000
 #define TABFORGE_SCREEN_DIM_GRACE_MS 10000
 #define TABFORGE_WIFI_MAX_APS 8
@@ -359,6 +362,8 @@ typedef struct {
     lv_obj_t *wifi_ssid_textarea;
     lv_obj_t *wifi_password_textarea;
     lv_obj_t *wifi_keyboard;
+    lv_obj_t *mobile_base_pair_textarea;
+    lv_obj_t *mobile_base_keyboard;
     lv_obj_t *accessory_label;
     lv_obj_t *usb_label;
     lv_obj_t *ir_label;
@@ -832,13 +837,28 @@ static uint16_t g_wifi_selected_ap;
 static char g_wifi_ip[16] = "--";
 static bool g_mobile_base_refreshing;
 static bool g_mobile_base_online;
+static bool g_mobile_base_control_running;
 static uint32_t g_mobile_base_worker_count;
 static uint32_t g_mobile_base_online_workers;
 static char g_mobile_base_version[24] = "unknown";
+static char g_mobile_base_mission_id[48] = "";
 static char g_mobile_base_mission[96] = "Waiting for Mobile Base.";
 static char g_mobile_base_gps[96] = "No GPS position received yet.";
 static char g_mobile_base_workers[96] = "Workers have not been checked.";
+static char g_mobile_base_sensors[112] = "ESP32 sensors have not been checked.";
 static char g_mobile_base_status[TABFORGE_MOBILE_BASE_STATUS_LEN] = "Connect TabForge to the Mobile Base field LAN.";
+static char g_mobile_base_control_key[TABFORGE_MOBILE_BASE_KEY_LEN] = "";
+static char g_mobile_base_pair_code[TABFORGE_MOBILE_BASE_PAIR_LEN] = "";
+static uint32_t g_mobile_base_last_poll_ms;
+typedef enum {
+    MOBILE_BASE_ACTION_NONE = 0,
+    MOBILE_BASE_ACTION_START_MISSION,
+    MOBILE_BASE_ACTION_END_MISSION,
+    MOBILE_BASE_ACTION_RESCAN,
+    MOBILE_BASE_ACTION_WIFI_SCAN,
+    MOBILE_BASE_ACTION_SENSOR_SAMPLE,
+} mobile_base_action_t;
+static mobile_base_action_t g_mobile_base_pending_action;
 static char g_ota_manifest_url[256] = TABFORGE_MANIFEST_URL;
 static char g_ota_firmware_url[256] = "";
 static char g_ota_version[32] = "";
@@ -877,6 +897,8 @@ static void sdr_request_scan(const char *reason);
 static void wifi_scan_task(void *arg);
 static void start_mic_monitor(const char *reason);
 static void mobile_base_refresh_task(void *arg);
+static void mobile_base_pair_task(void *arg);
+static void mobile_base_control_task(void *arg);
 static void append_event(const char *event);
 static bool cardputer_keyboard_ingest(const char *source, const uint8_t *data, size_t data_len);
 static bool cardputer_keyboard_present(void);
@@ -1598,6 +1620,7 @@ static void write_default_config_if_missing(void)
             "  \"updateChannel\": \"stable\",\n"
             "  \"ui\": { \"home\": \"tablet\", \"autoRotate\": true, \"liveStats\": true, \"screenTimeoutSeconds\": 120, \"sleepOnTimeout\": true },\n"
             "  \"wifi\": { \"ssid\": \"\", \"password\": \"\", \"autoConnect\": false },\n"
+            "  \"mobileBase\": { \"apiUrl\": \"%s\", \"pairOnDevice\": true },\n"
             "  \"mesh\": { \"defaultChannel\": 0, \"gpsShare\": false, \"saveNodes\": true, \"voiceDrafts\": true, \"storeSecrets\": false },\n"
             "  \"appStore\": { \"manifestUrl\": \"%s\", \"installRoot\": \"/tabforge/apps\", \"cacheOnSd\": true, \"nativeCode\": false },\n"
             "  \"devices\": {\n"
@@ -1607,6 +1630,7 @@ static void write_default_config_if_missing(void)
             "  },\n"
             "  \"ota\": { \"manifestUrl\": \"%s\", \"requireButtonConfirm\": true }\n"
             "}\n",
+            TABFORGE_MOBILE_BASE_URL,
             TABFORGE_APP_STORE_URL,
             TABFORGE_MANIFEST_URL);
     fclose(f);
@@ -1668,9 +1692,34 @@ static void save_wifi_credentials_to_nvs(void)
     }
 }
 
+static void load_mobile_base_key_from_nvs(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(TABFORGE_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return;
+    }
+    size_t key_len = sizeof(g_mobile_base_control_key);
+    if (nvs_get_str(handle, TABFORGE_NVS_MOBILE_BASE_KEY, g_mobile_base_control_key, &key_len) != ESP_OK) {
+        g_mobile_base_control_key[0] = '\0';
+    }
+    nvs_close(handle);
+}
+
+static esp_err_t save_mobile_base_key_to_nvs(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(TABFORGE_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(handle, TABFORGE_NVS_MOBILE_BASE_KEY, g_mobile_base_control_key);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
 static void load_runtime_config(void)
 {
     load_wifi_credentials_from_nvs();
+    load_mobile_base_key_from_nvs();
 
     FILE *f = fopen(TABFORGE_CONFIG_PATH, "rb");
     if (f == NULL) {
