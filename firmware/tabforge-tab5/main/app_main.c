@@ -4318,6 +4318,45 @@ static esp_err_t http_get_to_buffer(const char *url, char *buffer, size_t buffer
     return (status >= 200 && status < 300) ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t http_post_json(const char *url,
+                                const char *json,
+                                const char *control_key,
+                                char *buffer,
+                                size_t buffer_size)
+{
+    if (url == NULL || json == NULL || buffer == NULL || buffer_size < 2) return ESP_ERR_INVALID_ARG;
+    esp_http_client_config_t config = {
+        .url = url,
+        .timeout_ms = 15000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .method = HTTP_METHOD_POST,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) return ESP_FAIL;
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_header(client, "Accept", "application/json");
+    if (control_key != NULL && control_key[0] != '\0') {
+        esp_http_client_set_header(client, "X-Mobile-Base-Key", control_key);
+    }
+    size_t body_len = strlen(json);
+    esp_err_t err = esp_http_client_open(client, (int)body_len);
+    if (err == ESP_OK && esp_http_client_write(client, json, (int)body_len) != (int)body_len) err = ESP_FAIL;
+    if (err == ESP_OK) esp_http_client_fetch_headers(client);
+    int total = 0;
+    while (err == ESP_OK && total < (int)buffer_size - 1) {
+        int got = esp_http_client_read(client, buffer + total, (int)buffer_size - 1 - total);
+        if (got < 0) { err = ESP_FAIL; break; }
+        if (got == 0) break;
+        total += got;
+    }
+    buffer[total] = '\0';
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    if (err != ESP_OK) return err;
+    return (status >= 200 && status < 300) ? ESP_OK : ESP_FAIL;
+}
+
 static void mobile_base_refresh_task(void *arg)
 {
     (void)arg;
@@ -4371,11 +4410,35 @@ static void mobile_base_refresh_task(void *arg)
     }
     if (cJSON_IsObject(mission)) {
         const cJSON *name = cJSON_GetObjectItemCaseSensitive(mission, "name");
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(mission, "id");
         strlcpy(g_mobile_base_mission,
                 cJSON_IsString(name) && name->valuestring != NULL ? name->valuestring : "Active field mission",
                 sizeof(g_mobile_base_mission));
+        strlcpy(g_mobile_base_mission_id,
+                cJSON_IsString(id) && id->valuestring != NULL ? id->valuestring : "",
+                sizeof(g_mobile_base_mission_id));
     } else {
         strlcpy(g_mobile_base_mission, "No active mission.", sizeof(g_mobile_base_mission));
+        g_mobile_base_mission_id[0] = '\0';
+    }
+
+    snprintf(url, sizeof(url), "%s/api/sensors/status", TABFORGE_MOBILE_BASE_URL);
+    err = http_get_to_buffer(url, buffer, 8192);
+    if (err == ESP_OK) {
+        root = cJSON_Parse(buffer);
+        const cJSON *devices = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "devices") : NULL;
+        unsigned ready = 0;
+        unsigned errors = 0;
+        if (cJSON_IsArray(devices)) {
+            const cJSON *device = NULL;
+            cJSON_ArrayForEach(device, devices) {
+                const cJSON *state = cJSON_GetObjectItemCaseSensitive(device, "state");
+                if (cJSON_IsString(state) && strcmp(state->valuestring, "ready") == 0) ready++;
+                else errors++;
+            }
+            snprintf(g_mobile_base_sensors, sizeof(g_mobile_base_sensors), "%u ESP32 ready | %u attention", ready, errors);
+        }
+        cJSON_Delete(root);
     }
     cJSON_Delete(root);
 
@@ -4423,6 +4486,7 @@ static void mobile_base_refresh_task(void *arg)
 
     heap_caps_free(buffer);
     g_mobile_base_online = true;
+    g_mobile_base_last_poll_ms = now_ms_u32();
     snprintf(g_mobile_base_status,
              sizeof(g_mobile_base_status),
              "Connected to %s | API v%s",
@@ -4432,6 +4496,93 @@ static void mobile_base_refresh_task(void *arg)
     update_activity_from_task("Mobile Base", g_mobile_base_status);
     append_event("mobile_base_refreshed");
     request_active_app_refresh();
+    vTaskDelete(NULL);
+}
+
+static void mobile_base_pair_task(void *arg)
+{
+    (void)arg;
+    char response[1024] = {0};
+    char payload[160];
+    char url[160];
+    snprintf(payload, sizeof(payload), "{\"pairing_code\":\"%.8s\",\"device_name\":\"TabForge Tab5\"}", g_mobile_base_pair_code);
+    snprintf(url, sizeof(url), "%s/api/controller/pair", TABFORGE_MOBILE_BASE_URL);
+    esp_err_t err = http_post_json(url, payload, NULL, response, sizeof(response));
+    if (err == ESP_OK) {
+        cJSON *root = cJSON_Parse(response);
+        const cJSON *key = root != NULL ? cJSON_GetObjectItemCaseSensitive(root, "controller_key") : NULL;
+        if (cJSON_IsString(key) && key->valuestring != NULL && strlen(key->valuestring) < sizeof(g_mobile_base_control_key)) {
+            strlcpy(g_mobile_base_control_key, key->valuestring, sizeof(g_mobile_base_control_key));
+            err = save_mobile_base_key_to_nvs();
+        } else {
+            err = ESP_ERR_INVALID_RESPONSE;
+        }
+        cJSON_Delete(root);
+    }
+    if (err == ESP_OK) {
+        strlcpy(g_mobile_base_status, "Tab5 paired for full Mobile Base control.", sizeof(g_mobile_base_status));
+        append_event("mobile_base_paired");
+    } else {
+        snprintf(g_mobile_base_status, sizeof(g_mobile_base_status), "Pairing failed: %s", esp_err_to_name(err));
+        append_event("mobile_base_pair_failed");
+    }
+    g_mobile_base_control_running = false;
+    request_active_app_refresh();
+    vTaskDelete(NULL);
+}
+
+static void mobile_base_control_task(void *arg)
+{
+    (void)arg;
+    mobile_base_action_t action = g_mobile_base_pending_action;
+    g_mobile_base_pending_action = MOBILE_BASE_ACTION_NONE;
+    char url[224];
+    const char *payload = "{}";
+    const char *label = "control";
+    switch (action) {
+    case MOBILE_BASE_ACTION_START_MISSION:
+        snprintf(url, sizeof(url), "%s/api/missions", TABFORGE_MOBILE_BASE_URL);
+        payload = "{\"name\":\"Tab5 Field Mission\",\"operator\":\"TabForge Tab5\"}";
+        label = "start mission";
+        break;
+    case MOBILE_BASE_ACTION_END_MISSION:
+        if (g_mobile_base_mission_id[0] == '\0') {
+            strlcpy(g_mobile_base_status, "No active mission to end.", sizeof(g_mobile_base_status));
+            g_mobile_base_control_running = false;
+            request_active_app_refresh();
+            vTaskDelete(NULL);
+            return;
+        }
+        snprintf(url, sizeof(url), "%s/api/missions/%s/end", TABFORGE_MOBILE_BASE_URL, g_mobile_base_mission_id);
+        label = "end mission";
+        break;
+    case MOBILE_BASE_ACTION_RESCAN:
+        snprintf(url, sizeof(url), "%s/api/sensors/rescan", TABFORGE_MOBILE_BASE_URL);
+        label = "rescan sensors";
+        break;
+    case MOBILE_BASE_ACTION_WIFI_SCAN:
+        snprintf(url, sizeof(url), "%s/api/sensors/wifi_survey/scan", TABFORGE_MOBILE_BASE_URL);
+        label = "Wi-Fi scan";
+        break;
+    case MOBILE_BASE_ACTION_SENSOR_SAMPLE:
+        snprintf(url, sizeof(url), "%s/api/sensors/sensor_controller/sample", TABFORGE_MOBILE_BASE_URL);
+        label = "sensor sample";
+        break;
+    default:
+        g_mobile_base_control_running = false;
+        vTaskDelete(NULL);
+        return;
+    }
+    char response[1024] = {0};
+    esp_err_t err = http_post_json(url, payload, g_mobile_base_control_key, response, sizeof(response));
+    snprintf(g_mobile_base_status, sizeof(g_mobile_base_status), "%s: %s", label, err == ESP_OK ? "accepted" : esp_err_to_name(err));
+    append_event(err == ESP_OK ? "mobile_base_control_ok" : "mobile_base_control_failed");
+    g_mobile_base_control_running = false;
+    if (err == ESP_OK && !g_mobile_base_refreshing) {
+        xTaskCreate(mobile_base_refresh_task, "tabforge-mobile-base", 8192, NULL, 5, NULL);
+    } else {
+        request_active_app_refresh();
+    }
     vTaskDelete(NULL);
 }
 
@@ -5998,6 +6149,54 @@ static void mobile_base_refresh_button_event_cb(lv_event_t *event)
     }
     xTaskCreate(mobile_base_refresh_task, "tabforge-mobile-base", 8192, NULL, 5, NULL);
 }
+
+static void mobile_base_textarea_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    lv_obj_t *target = lv_event_get_target(event);
+    if (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED) {
+        g_cardputer_focus_textarea = target;
+        if (g_ui.mobile_base_keyboard != NULL) {
+            lv_keyboard_set_textarea(g_ui.mobile_base_keyboard, target);
+            lv_obj_clear_flag(g_ui.mobile_base_keyboard, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+        if (g_ui.mobile_base_keyboard != NULL) lv_obj_add_flag(g_ui.mobile_base_keyboard, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void mobile_base_pair_button_event_cb(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED || g_mobile_base_control_running) return;
+    const char *code = g_ui.mobile_base_pair_textarea != NULL ? lv_textarea_get_text(g_ui.mobile_base_pair_textarea) : "";
+    if (code == NULL || strlen(code) != 8) {
+        strlcpy(g_mobile_base_status, "Enter the Pi's 8-digit pairing code.", sizeof(g_mobile_base_status));
+        request_active_app_refresh();
+        return;
+    }
+    strlcpy(g_mobile_base_pair_code, code, sizeof(g_mobile_base_pair_code));
+    g_mobile_base_control_running = true;
+    xTaskCreate(mobile_base_pair_task, "tabforge-mb-pair", 6144, NULL, 5, NULL);
+}
+
+static void mobile_base_queue_action(mobile_base_action_t action)
+{
+    if (g_mobile_base_control_running) return;
+    if (g_mobile_base_control_key[0] == '\0') {
+        strlcpy(g_mobile_base_status, "Pair this Tab5 before using controls.", sizeof(g_mobile_base_status));
+        request_active_app_refresh();
+        return;
+    }
+    g_mobile_base_control_running = true;
+    g_mobile_base_pending_action = action;
+    xTaskCreate(mobile_base_control_task, "tabforge-mb-control", 6144, NULL, 5, NULL);
+}
+
+static void mobile_base_start_event_cb(lv_event_t *event) { if (lv_event_get_code(event) == LV_EVENT_CLICKED) mobile_base_queue_action(MOBILE_BASE_ACTION_START_MISSION); }
+static void mobile_base_end_event_cb(lv_event_t *event) { if (lv_event_get_code(event) == LV_EVENT_CLICKED) mobile_base_queue_action(MOBILE_BASE_ACTION_END_MISSION); }
+static void mobile_base_rescan_event_cb(lv_event_t *event) { if (lv_event_get_code(event) == LV_EVENT_CLICKED) mobile_base_queue_action(MOBILE_BASE_ACTION_RESCAN); }
+static void mobile_base_wifi_scan_event_cb(lv_event_t *event) { if (lv_event_get_code(event) == LV_EVENT_CLICKED) mobile_base_queue_action(MOBILE_BASE_ACTION_WIFI_SCAN); }
+static void mobile_base_sample_event_cb(lv_event_t *event) { if (lv_event_get_code(event) == LV_EVENT_CLICKED) mobile_base_queue_action(MOBILE_BASE_ACTION_SENSOR_SAMPLE); }
 
 static bool grove_uart_send_bytes(const uint8_t *data, size_t data_len, const char *label)
 {
@@ -8752,6 +8951,8 @@ static void add_app_actions(lv_obj_t *parent,
     lv_coord_t action_h = landscape ? 112 : 236;
     if (app_id == APP_MESSAGES || app_id == APP_MESHTASTIC) {
         action_h = landscape ? 212 : 408;
+    } else if (app_id == APP_MOBILE_BASE) {
+        action_h = landscape ? 330 : 610;
     } else if (app_id == APP_MESHCORE || app_id == APP_TDECK || app_id == APP_RECORDER ||
                app_id == APP_USB || app_id == APP_IR || app_id == APP_SDR ||
                app_id == APP_ROADSCOUT || app_id == APP_WARDRIVE ||
@@ -8869,7 +9070,25 @@ static void add_app_actions(lv_obj_t *parent,
         break;
     case APP_MOBILE_BASE:
         make_button(actions, button_w, "Refresh", mobile_base_refresh_button_event_cb);
-        make_button(actions, button_w, "Wi-Fi Center", update_button_event_cb);
+        make_button(actions, button_w, "Start Mission", mobile_base_start_event_cb);
+        make_button(actions, button_w, "End Mission", mobile_base_end_event_cb);
+        make_button(actions, button_w, "Rescan Sensors", mobile_base_rescan_event_cb);
+        make_button(actions, button_w, "Wi-Fi Survey", mobile_base_wifi_scan_event_cb);
+        make_button(actions, button_w, "Sensor Sample", mobile_base_sample_event_cb);
+        g_ui.mobile_base_pair_textarea = lv_textarea_create(actions);
+        lv_obj_set_size(g_ui.mobile_base_pair_textarea, width - 20, 42);
+        lv_textarea_set_one_line(g_ui.mobile_base_pair_textarea, true);
+        lv_textarea_set_accepted_chars(g_ui.mobile_base_pair_textarea, "0123456789");
+        lv_textarea_set_max_length(g_ui.mobile_base_pair_textarea, 8);
+        lv_textarea_set_placeholder_text(g_ui.mobile_base_pair_textarea, "8-digit Pi pairing code");
+        lv_obj_set_style_bg_color(g_ui.mobile_base_pair_textarea, color_hex(0x172126), 0);
+        lv_obj_set_style_text_color(g_ui.mobile_base_pair_textarea, color_hex(0xf1f7f3), 0);
+        lv_obj_add_event_cb(g_ui.mobile_base_pair_textarea, mobile_base_textarea_event_cb, LV_EVENT_ALL, NULL);
+        make_button(actions, button_w, g_mobile_base_control_key[0] != '\0' ? "Re-pair Tab5" : "Pair Tab5", mobile_base_pair_button_event_cb);
+        g_ui.mobile_base_keyboard = lv_keyboard_create(actions);
+        lv_obj_set_size(g_ui.mobile_base_keyboard, width - 20, landscape ? 140 : 180);
+        lv_keyboard_set_mode(g_ui.mobile_base_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+        lv_obj_add_flag(g_ui.mobile_base_keyboard, LV_OBJ_FLAG_HIDDEN);
         break;
     case APP_CARDPUTER:
         make_button(actions, button_w, "Power Link", cardputer_power_button_event_cb);
@@ -9158,8 +9377,9 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Pi Link", line_a, width - 32, g_mobile_base_online ? 0x77dd88 : 0xffc857);
         add_app_status_line(card, "Mission", line_b, width - 32, 0x22d3ee);
         add_app_status_line(card, "Position", line_c, width - 32, 0x6ee7a2);
+        add_app_status_line(card, "ESP32", g_mobile_base_sensors, width - 32, 0x77dd88);
         add_app_status_line(card, "Status", g_mobile_base_status, width - 32, 0xf1f7f3);
-        add_app_status_line(card, "Control", "Mobile Base auto-starts recording; full dashboard and SSH stay on the Pi LAN.", width - 32, 0x93a6ad);
+        add_app_status_line(card, "Control", g_mobile_base_control_key[0] != '\0' ? "Paired: full mission and sensor controls enabled." : "Enter the Pi pairing code below to enable controls.", width - 32, 0x93a6ad);
         break;
     case APP_CARDPUTER: {
         uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
@@ -10466,6 +10686,13 @@ static void stats_task(void *arg)
     (void)arg;
 
     while (true) {
+        uint32_t now = now_ms_u32();
+        if (g_active_app == APP_MOBILE_BASE && g_nav_page == NAV_PAGE_APP && g_wifi_has_ip &&
+            !g_mobile_base_refreshing && !g_mobile_base_control_running &&
+            (uint32_t)(now - g_mobile_base_last_poll_ms) >= 10000U) {
+            g_mobile_base_last_poll_ms = now;
+            xTaskCreate(mobile_base_refresh_task, "tabforge-mobile-base", 8192, NULL, 5, NULL);
+        }
         if (bsp_display_lock(1000)) {
             check_screen_power_locked();
             apply_cardputer_pending_input_locked();
