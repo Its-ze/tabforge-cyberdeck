@@ -5,6 +5,30 @@
   "defaultMode": "meshtastic",
   "apps": [
     {
+      "id": "dashboard",
+      "name": "Dashboard",
+      "group": "system",
+      "status": "placeholder",
+      "surfaces": ["tab5"],
+      "capabilities": ["unraid-card-boundary", "personal-program-card-boundary", "scribe-health-card-boundary"]
+    },
+    {
+      "id": "scribe-tasks",
+      "name": "Scribe Tasks",
+      "group": "scribe",
+      "status": "api-blocked",
+      "surfaces": ["tab5"],
+      "capabilities": ["authenticated-api-only", "offline-queue-boundary", "no-direct-database-write"]
+    },
+    {
+      "id": "voice-memo",
+      "name": "Voice Memo",
+      "group": "scribe",
+      "status": "api-blocked",
+      "surfaces": ["tab5"],
+      "capabilities": ["wav-to-sd", "preserve-local-on-failure", "scribe-ingest-boundary", "transcription-status-boundary"]
+    },
+    {
       "id": "mesh-dashboard",
       "name": "Mesh Dashboard",
       "group": "mesh",
@@ -98,7 +122,7 @@
       "group": "ports",
       "status": "active",
       "surfaces": ["tab5", "github-pages"],
-      "capabilities": ["usb-descriptor-scan", "rtl2832-detect", "field-presets", "event-log", "mini-app-actions"]
+      "capabilities": ["receive-only", "usb-descriptor-scan", "rtl2832-detect", "field-presets", "event-log", "future-flight-view-boundary", "mini-app-actions"]
     },
     {
       "id": "cardputer-keyboard",

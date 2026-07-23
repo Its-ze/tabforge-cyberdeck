@@ -2,28 +2,38 @@
 
 TabForge keeps the Tab5 as the operator surface and treats the C6L and T-Deck as managed radios. This avoids one firmware image trying to own every radio stack at the same time.
 
-## Layers
+## Product Layers
 
-1. Tab5 shell
-   - LVGL touchscreen launcher.
-   - USB host device picker.
-   - SD-backed config and logs.
-   - Mic recorder, IR app, update center, and system dashboard.
+1. Layer 1: HAL and device data
+   - Board drivers and device adapters stay below the UI.
+   - `tabforge_layer1_device.*` emits a versioned, digestible device snapshot for the shell, apps, and future authenticated APIs.
+   - Existing C6L, T-Deck, IR, USB, SD, mic, battery, IMU, display, and touch code remains intact while it is migrated behind this boundary.
 
-2. Device adapters
-   - `unit-c6l`: Meshtastic serial, MeshCore console, or TabForge bridge profile.
-   - `tdeck`: Z-Deck/Meshtastic serial and safe update helper.
-   - `unit-ir`: Grove IR receive/transmit.
-   - `usb-host`: keyboards, serial devices, and removable storage.
+2. Layer 2: shell
+   - `tabforge_layer2_shell.*` owns routes, theme selection, clock text, battery text, and persistent save feedback.
+   - The current LVGL launcher remains the renderer. It reads the shell model instead of owning persisted state.
+   - Every Save flow must show `saving`, `saved`, or `failed`; persistence must never be visually ambiguous.
 
-3. Mode drivers
-   - Meshtastic driver: node list, text messages, direct sends, GPS handoff, canned messages, and status.
-   - MeshCore driver: command console, contact/room metadata, `start ota`, and browser upload helper.
-   - Bridge driver: newline JSON packets for devices flashed with TabForge bridge firmware.
+3. Layer 3: apps and pages
+   - `tabforge_layer3_apps.*` defines Dashboard, Scribe Tasks, Voice Memo, Update, and receive-only SDR boundaries.
+   - Dashboard cards remain placeholders until their authenticated read APIs and exact requirements are supplied.
+   - Scribe Tasks and Voice Memo may use only the shared authenticated Scribe API. Direct database writes are forbidden.
+   - SDR remains receive-only. Deep DSP, aircraft decoding, and direction/location views are future modules.
 
-4. Update path
+## Device Adapters
+
+- `unit-c6l`: Meshtastic serial, MeshCore console, or TabForge bridge profile.
+- `tdeck`: Z-Deck/Meshtastic serial and safe update helper.
+- `unit-ir`: Grove IR receive/transmit.
+- `usb-host`: keyboards, serial devices, and removable storage.
+
+## Update Path
+
    - Tab5 checks GitHub Pages manifest.
-   - Firmware URLs are downloaded only after SHA256 validation metadata is available.
+   - Manifest and firmware URLs must use HTTPS.
+   - Firmware is written only after size and SHA256 validation metadata is available.
+   - Dual OTA slots and bootloader rollback are enabled, and the Update page exposes rollback state.
+   - Image-signature enforcement is not claimed until an offline signing key and a tested recovery procedure exist.
    - The Update button requires on-screen confirmation before writing flash.
    - Companion-device update helpers never erase private storage by default.
 
@@ -52,4 +62,3 @@ The first slice should work without replacing C6L firmware:
 5. Mic Deck records a WAV to SD.
 6. IR Lab learns and replays a NEC code.
 7. Update Center checks GitHub Pages and reports whether an update exists.
-

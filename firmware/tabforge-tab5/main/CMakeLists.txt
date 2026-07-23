@@ -2,8 +2,12 @@ idf_component_register(
     SRCS
         "app_main.c"
         "tabforge_ble.c"
+        "layers/tabforge_layer1_device.c"
+        "layers/tabforge_layer2_shell.c"
+        "layers/tabforge_layer3_apps.c"
     INCLUDE_DIRS
         "."
+        "layers"
     REQUIRES
         app_update
         bt

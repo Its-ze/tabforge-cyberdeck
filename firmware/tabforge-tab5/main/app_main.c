@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
+#include <time.h>
 
 #include "bsp/esp-bsp.h"
 #include "driver/gpio.h"
@@ -37,6 +38,9 @@
 #include "cJSON.h"
 #include "mbedtls/sha256.h"
 #include "tabforge_ble.h"
+#include "layers/tabforge_layer1_device.h"
+#include "layers/tabforge_layer2_shell.h"
+#include "layers/tabforge_layer3_apps.h"
 
 #ifndef TABFORGE_VERSION
 #define TABFORGE_VERSION "0.1.0"
@@ -248,6 +252,9 @@ typedef enum {
     APP_BRUCE,
     APP_FILES,
     APP_STORE,
+    APP_DASHBOARD,
+    APP_SCRIBE_TASKS,
+    APP_VOICE_MEMO,
     APP_UPDATE,
 } app_id_t;
 
@@ -507,6 +514,9 @@ typedef struct {
 } companion_state_t;
 
 static const feature_tile_t g_tiles[] = {
+    {LV_SYMBOL_HOME, "Dashboard", "Reserved cards for later Unraid and personal-program readouts.", "Placeholders", "tile_dashboard", APP_DASHBOARD, FEATURE_ACTIVE, 0x22d3ee},
+    {LV_SYMBOL_LIST, "Scribe Tasks", "Authenticated task sync through the shared Scribe API.", "API Hook", "tile_scribe_tasks", APP_SCRIBE_TASKS, FEATURE_ACTIVE, 0x70a7ff},
+    {LV_SYMBOL_AUDIO, "Voice Memo", "Capture locally, preserve the WAV, then submit through normal Scribe ingest.", "Ingest Hook", "tile_voice_memo", APP_VOICE_MEMO, FEATURE_ACTIVE, 0xb982ff},
     {LV_SYMBOL_WIFI, "Wi-Fi", "Scan, connect, and prepare internet OTA.", "Internet", "tile_wifi", APP_WIFI, FEATURE_ACTIVE, 0x70a7ff},
     {LV_SYMBOL_ENVELOPE, "Mesh Chats", "Channel chat view, saved nodes, voice drafts, and test sends.", "Chats", "tile_messages", APP_MESSAGES, FEATURE_ACTIVE, 0x43d17a},
     {LV_SYMBOL_GPS, "Meshtastic", "Meshtastic serial API, C6L bridge, channels, GPS, and node messages.", "LoRa", "tile_meshtastic", APP_MESHTASTIC, FEATURE_ACTIVE, 0x6ee7a2},
@@ -569,6 +579,9 @@ static const char *g_mesh_drafts[] = {
 };
 
 static ui_refs_t g_ui;
+static tabforge_device_data_t g_layer1_device;
+static tabforge_shell_t g_layer2_shell;
+static tabforge_apps_t g_layer3_apps;
 static lv_display_t *g_display;
 static lv_disp_rotation_t g_rotation = LV_DISPLAY_ROTATION_90;
 static lv_disp_rotation_t g_pending_rotation = LV_DISPLAY_ROTATION_90;
@@ -866,6 +879,7 @@ static char g_ota_firmware_url[256] = "";
 static char g_ota_version[32] = "";
 static char g_ota_sha256[65] = "";
 static uint32_t g_ota_size;
+static uint32_t g_ota_downloaded_size;
 static ota_state_t g_ota_state = OTA_STATE_IDLE;
 static esp_err_t g_ota_last_error = ESP_OK;
 static bool g_ota_reboot_pending;
@@ -1225,6 +1239,67 @@ static uint32_t now_ms_u32(void)
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
+static void refresh_layered_shell_clock(void)
+{
+    time_t now = time(NULL);
+    struct tm local_time = {0};
+    char clock_text[24];
+    if (now > 1704067200 && localtime_r(&now, &local_time) != NULL) {
+        strftime(clock_text, sizeof(clock_text), "%I:%M %p", &local_time);
+    } else {
+        uint32_t uptime_minutes = now_ms_u32() / 60000U;
+        snprintf(clock_text,
+                 sizeof(clock_text),
+                 "UP %lu:%02lu",
+                 (unsigned long)(uptime_minutes / 60U),
+                 (unsigned long)(uptime_minutes % 60U));
+    }
+    tabforge_shell_set_clock(&g_layer2_shell, clock_text);
+}
+
+static void refresh_layered_device_data(void)
+{
+    g_layer1_device.uptime_ms = now_ms_u32();
+    g_layer1_device.battery_percent = g_battery_percent;
+    g_layer1_device.battery_mv = g_battery_mv > 0 ? (uint32_t)g_battery_mv : 0U;
+    g_layer1_device.charging = false;
+    g_layer1_device.display_ready = g_display != NULL;
+    g_layer1_device.sd_ready = g_sd_ready;
+    g_layer1_device.wifi_ready = g_wifi_has_ip;
+    g_layer1_device.mic_ready = g_mic_state == MIC_STATE_ONLINE;
+    g_layer1_device.usb_host_ready = g_usb_host_ready;
+    tabforge_device_data_update_health(&g_layer1_device);
+    tabforge_shell_set_battery(&g_layer2_shell,
+                               g_battery_percent,
+                               g_layer1_device.battery_mv,
+                               false);
+}
+
+static void refresh_layered_ota_status(void)
+{
+    bool rollback_enabled = false;
+    bool rollback_available = false;
+    bool pending_boot_validation = false;
+    bool signature_verification_available = false;
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    rollback_enabled = true;
+    rollback_available = esp_ota_check_rollback_is_possible();
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (running != NULL && esp_ota_get_state_partition(running, &state) == ESP_OK) {
+        pending_boot_validation = state == ESP_OTA_IMG_PENDING_VERIFY;
+    }
+#endif
+#if defined(CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT) || defined(CONFIG_SECURE_BOOT)
+    signature_verification_available = true;
+#endif
+    tabforge_ota_set_boot_status(&g_layer3_apps,
+                                 rollback_enabled,
+                                 rollback_available,
+                                 pending_boot_validation,
+                                 signature_verification_available);
+}
+
 static void format_screen_status(char *buffer, size_t buffer_size)
 {
     if (g_screen_power_error != ESP_OK) {
@@ -1492,10 +1567,12 @@ static void load_screen_settings(void)
 
 static void save_screen_timeout_setting(void)
 {
+    tabforge_shell_save_begin(&g_layer2_shell, "screen timeout", now_ms_u32());
     nvs_handle_t handle;
     esp_err_t err = nvs_open(TABFORGE_NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "screen timeout save failed: %s", esp_err_to_name(err));
+        tabforge_shell_save_finish(&g_layer2_shell, "Screen timeout", false, now_ms_u32());
         return;
     }
 
@@ -1508,6 +1585,7 @@ static void save_screen_timeout_setting(void)
     if (err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "screen timeout save failed: %s", esp_err_to_name(err));
     }
+    tabforge_shell_save_finish(&g_layer2_shell, "Screen timeout", err == ESP_OK, now_ms_u32());
 }
 
 static void enter_screen_dim(const char *event_name)
@@ -1673,10 +1751,12 @@ static void save_wifi_credentials_to_nvs(void)
         return;
     }
 
+    tabforge_shell_save_begin(&g_layer2_shell, "Wi-Fi settings", now_ms_u32());
     nvs_handle_t handle;
     esp_err_t err = nvs_open(TABFORGE_NVS_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "wifi credentials save failed: %s", esp_err_to_name(err));
+        tabforge_shell_save_finish(&g_layer2_shell, "Wi-Fi settings", false, now_ms_u32());
         return;
     }
 
@@ -1692,6 +1772,7 @@ static void save_wifi_credentials_to_nvs(void)
     if (err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "wifi credentials save failed: %s", esp_err_to_name(err));
     }
+    tabforge_shell_save_finish(&g_layer2_shell, "Wi-Fi settings", err == ESP_OK, now_ms_u32());
 }
 
 static void load_mobile_base_key_from_nvs(void)
@@ -1709,12 +1790,17 @@ static void load_mobile_base_key_from_nvs(void)
 
 static esp_err_t save_mobile_base_key_to_nvs(void)
 {
+    tabforge_shell_save_begin(&g_layer2_shell, "Mobile Base pairing", now_ms_u32());
     nvs_handle_t handle;
     esp_err_t err = nvs_open(TABFORGE_NVS_NAMESPACE, NVS_READWRITE, &handle);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        tabforge_shell_save_finish(&g_layer2_shell, "Mobile Base pairing", false, now_ms_u32());
+        return err;
+    }
     err = nvs_set_str(handle, TABFORGE_NVS_MOBILE_BASE_KEY, g_mobile_base_control_key);
     if (err == ESP_OK) err = nvs_commit(handle);
     nvs_close(handle);
+    tabforge_shell_save_finish(&g_layer2_shell, "Mobile Base pairing", err == ESP_OK, now_ms_u32());
     return err;
 }
 
@@ -3650,6 +3736,24 @@ static void refresh_nav_styles(void)
 static void show_nav_page(nav_page_t page)
 {
     g_nav_page = page;
+    switch (page) {
+    case NAV_PAGE_SETTINGS:
+        tabforge_shell_set_route(&g_layer2_shell, "settings");
+        break;
+    case NAV_PAGE_UPDATE:
+        tabforge_shell_set_route(&g_layer2_shell, "update");
+        break;
+    case NAV_PAGE_APP:
+        tabforge_shell_set_route(&g_layer2_shell, "app");
+        break;
+    case NAV_PAGE_APPS:
+        tabforge_shell_set_route(&g_layer2_shell, "apps");
+        break;
+    case NAV_PAGE_HOME:
+    default:
+        tabforge_shell_set_route(&g_layer2_shell, "home");
+        break;
+    }
     set_obj_hidden(g_ui.page_home, page != NAV_PAGE_HOME);
     set_obj_hidden(g_ui.page_apps, page != NAV_PAGE_APPS);
     set_obj_hidden(g_ui.page_settings, page != NAV_PAGE_SETTINGS);
@@ -3682,7 +3786,10 @@ static void show_nav_page(nav_page_t page)
 static void refresh_mode_widgets(void)
 {
     if (g_ui.status_label != NULL) {
-        lv_label_set_text_fmt(g_ui.status_label, "TabForge | %s", cardputer_keyboard_present() ? "KBD" : "Touch");
+        lv_label_set_text_fmt(g_ui.status_label,
+                              "TabForge | %s | %s",
+                              cardputer_keyboard_present() ? "KBD" : "Touch",
+                              g_layer2_shell.clock_text);
     }
 
     if (g_ui.mode_label != NULL) {
@@ -3867,6 +3974,8 @@ static void refresh_live_stats_locked(void)
 {
     char uptime[32];
     char battery_status[32];
+    refresh_layered_shell_clock();
+    refresh_layered_device_data();
     format_uptime(uptime, sizeof(uptime));
     format_battery_status(battery_status, sizeof(battery_status), true);
 
@@ -4046,7 +4155,7 @@ static void feature_tile_event_cb(lv_event_t *event)
     } else if (g_active_app == APP_MESHCORE) {
         g_meshcore_mode = true;
         refresh_mode_widgets();
-    } else if (g_active_app == APP_RECORDER) {
+    } else if (g_active_app == APP_RECORDER || g_active_app == APP_VOICE_MEMO) {
         start_mic_monitor("recorder_app");
     } else if (g_active_app == APP_MOBILE_BASE && !g_mobile_base_refreshing) {
         xTaskCreate(mobile_base_refresh_task, "tabforge-mobile-base", 8192, NULL, 5, NULL);
@@ -4273,7 +4382,7 @@ static void wifi_connect_task(void *arg)
         update_activity_from_task("Wi-Fi Connect", "Timed out waiting for IP.");
     } else {
         save_wifi_credentials_to_nvs();
-        update_activity_from_task("Wi-Fi Connected", g_wifi_ip);
+        update_activity_from_task("Wi-Fi Saved", g_layer2_shell.save_message);
     }
 
     vTaskDelete(NULL);
@@ -4535,7 +4644,7 @@ static void mobile_base_pair_task(void *arg)
         cJSON_Delete(root);
     }
     if (err == ESP_OK) {
-        strlcpy(g_mobile_base_status, "Tab5 paired for full Mobile Base control.", sizeof(g_mobile_base_status));
+        strlcpy(g_mobile_base_status, g_layer2_shell.save_message, sizeof(g_mobile_base_status));
         append_event("mobile_base_paired");
     } else {
         snprintf(g_mobile_base_status, sizeof(g_mobile_base_status), "Pairing failed: %s", esp_err_to_name(err));
@@ -5372,6 +5481,9 @@ static int compare_versions(const char *left, const char *right)
 
 static esp_err_t fetch_manifest_firmware_url(void)
 {
+    if (strncmp(g_ota_manifest_url, "https://", 8) != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
     char *manifest = tabforge_alloc_json_buffer(TABFORGE_OTA_MANIFEST_MAX_BYTES, "OTA manifest");
     if (manifest == NULL) {
         return ESP_ERR_NO_MEM;
@@ -5403,6 +5515,10 @@ static esp_err_t fetch_manifest_firmware_url(void)
     if (!cJSON_IsTrue(available) || !cJSON_IsString(url) || url->valuestring == NULL || url->valuestring[0] == '\0') {
         cJSON_Delete(root);
         return ESP_ERR_NOT_FOUND;
+    }
+    if (strncmp(url->valuestring, "https://", 8) != 0) {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_RESPONSE;
     }
     if (g_ota_version[0] == '\0' || compare_versions(g_ota_version, TABFORGE_VERSION) <= 0) {
         cJSON_Delete(root);
@@ -5476,6 +5592,8 @@ static esp_err_t download_and_apply_verified_ota(void)
     mbedtls_sha256_starts(&sha_context, 0);
 
     uint32_t total = 0;
+    uint32_t last_ui_update = 0;
+    g_ota_downloaded_size = 0;
     while (true) {
         int read_len = esp_http_client_read(client, (char *)buffer, TABFORGE_OTA_HTTP_CHUNK_SIZE);
         if (read_len < 0) {
@@ -5492,6 +5610,11 @@ static esp_err_t download_and_apply_verified_ota(void)
         }
         mbedtls_sha256_update(&sha_context, buffer, (size_t)read_len);
         total += (uint32_t)read_len;
+        g_ota_downloaded_size = total;
+        if (total - last_ui_update >= 65536U) {
+            last_ui_update = total;
+            request_active_app_refresh();
+        }
     }
 
     uint8_t actual_digest[32];
@@ -5740,12 +5863,37 @@ static void companion_add_diagnostics_json(cJSON *root)
 {
     char battery_status[32];
     format_battery_status(battery_status, sizeof(battery_status), false);
+    refresh_layered_shell_clock();
+    refresh_layered_device_data();
 
     cJSON_AddBoolToObject(root, "ok", true);
     cJSON_AddStringToObject(root, "name", "TabForge Cyberdeck");
     cJSON_AddStringToObject(root, "version", TABFORGE_VERSION);
     cJSON_AddNumberToObject(root, "uptimeMs", (double)now_ms_u32());
     cJSON_AddStringToObject(root, "ip", g_wifi_ip);
+
+    char device_json[768];
+    if (tabforge_device_data_format_json(&g_layer1_device,
+                                         device_json,
+                                         sizeof(device_json)) > 0U) {
+        cJSON *device_data = cJSON_Parse(device_json);
+        if (device_data != NULL) {
+            cJSON_AddItemToObject(root, "deviceData", device_data);
+        }
+    }
+
+    cJSON *architecture = cJSON_AddObjectToObject(root, "architecture");
+    if (architecture != NULL) {
+        cJSON_AddStringToObject(architecture, "schema", "tabforge.layers.v1");
+        cJSON_AddStringToObject(architecture, "layer1", "hal-device-data");
+        cJSON_AddStringToObject(architecture, "layer2", "shell");
+        cJSON_AddStringToObject(architecture, "layer3", "apps-pages");
+        cJSON_AddStringToObject(architecture, "route", g_layer2_shell.route);
+        cJSON_AddStringToObject(architecture,
+                                "saveState",
+                                tabforge_shell_save_state_text(g_layer2_shell.save_state));
+        cJSON_AddStringToObject(architecture, "saveMessage", g_layer2_shell.save_message);
+    }
 
     cJSON *wifi = cJSON_AddObjectToObject(root, "wifi");
     if (wifi != NULL) {
@@ -7669,7 +7817,7 @@ static void screen_timeout_button_event_cb(lv_event_t *event)
     save_screen_timeout_setting();
     lv_display_trigger_activity(g_display);
     refresh_screen_widgets_locked();
-    set_activity("Screen Timeout", screen_timeout_seconds() == 0 ? "Screen timeout disabled" : screen_timeout_label());
+    set_activity(tabforge_shell_save_state_text(g_layer2_shell.save_state), g_layer2_shell.save_message);
     append_event("screen_timeout_changed");
     ESP_LOGI(TABFORGE_TAG, "screen timeout set to %s", screen_timeout_label());
 }
@@ -7765,6 +7913,9 @@ static app_id_t cardputer_app_from_name(const char *app)
     if (app == NULL || app[0] == '\0' || strcmp(app, "home") == 0 || strcmp(app, "apps") == 0 || strcmp(app, "launcher") == 0) {
         return APP_NONE;
     }
+    if (strcmp(app, "dashboard") == 0) return APP_DASHBOARD;
+    if (strcmp(app, "scribe-tasks") == 0 || strcmp(app, "tasks") == 0) return APP_SCRIBE_TASKS;
+    if (strcmp(app, "voice-memo") == 0 || strcmp(app, "memo") == 0) return APP_VOICE_MEMO;
     if (strcmp(app, "wifi") == 0) return APP_WIFI;
     if (strcmp(app, "messages") == 0 || strcmp(app, "mesh") == 0) return APP_MESSAGES;
     if (strcmp(app, "meshtastic") == 0 || strcmp(app, "mestic") == 0 || strcmp(app, "lora") == 0) return APP_MESHTASTIC;
@@ -7813,7 +7964,7 @@ static void cardputer_open_tab_app_locked(const char *app)
         g_meshcore_mode = false;
     } else if (app_id == APP_MESHCORE) {
         g_meshcore_mode = true;
-    } else if (app_id == APP_RECORDER) {
+    } else if (app_id == APP_RECORDER || app_id == APP_VOICE_MEMO) {
         start_mic_monitor("cardputer_recorder");
     }
     show_nav_page(NAV_PAGE_APP);
@@ -9003,6 +9154,12 @@ static void add_app_actions(lv_obj_t *parent,
     make_button(actions, button_w, "Back", back_to_apps_button_event_cb);
 
     switch (app_id) {
+    case APP_DASHBOARD:
+    case APP_SCRIBE_TASKS:
+        break;
+    case APP_VOICE_MEMO:
+        make_button(actions, button_w, "Settings", settings_button_event_cb);
+        break;
     case APP_WIFI:
         make_button(actions, button_w, "Scan", wifi_scan_button_event_cb);
         make_button(actions, button_w, "Next AP", wifi_next_button_event_cb);
@@ -9222,6 +9379,50 @@ static void render_active_app_page_locked(void)
     format_screen_status(screen_status, sizeof(screen_status));
 
     switch (g_active_app) {
+    case APP_DASHBOARD: {
+        size_t dashboard_count = 0U;
+        const tabforge_dashboard_card_t *cards = tabforge_dashboard_placeholders(&dashboard_count);
+        for (size_t i = 0; i < dashboard_count; i++) {
+            add_app_status_line(card,
+                                cards[i].title,
+                                cards[i].status,
+                                width - 32,
+                                cards[i].configured ? 0x77dd88 : 0xffc857);
+        }
+        break;
+    }
+    case APP_SCRIBE_TASKS:
+        snprintf(line_a,
+                 sizeof(line_a),
+                 "API %s | auth %s | network %s",
+                 g_layer3_apps.tasks.api_configured ? "configured" : "needed",
+                 g_layer3_apps.tasks.authenticated ? "ready" : "needed",
+                 g_layer3_apps.tasks.online ? "online" : "offline");
+        snprintf(line_b,
+                 sizeof(line_b),
+                 "%lu pending | %lu completed",
+                 (unsigned long)g_layer3_apps.tasks.pending_count,
+                 (unsigned long)g_layer3_apps.tasks.completed_count);
+        add_app_status_line(card, "Boundary", line_a, width - 32, 0x70a7ff);
+        add_app_status_line(card, "Tasks", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Status", g_layer3_apps.tasks.status, width - 32, 0xffc857);
+        add_app_status_line(card, "Safety", "No direct database writes; offline changes remain queued until the authenticated API exists.", width - 32, 0x93a6ad);
+        break;
+    case APP_VOICE_MEMO:
+        snprintf(line_a,
+                 sizeof(line_a),
+                 "%s | mic %s",
+                 tabforge_voice_state_text(g_layer3_apps.voice.state),
+                 mic_state_text());
+        snprintf(line_b,
+                 sizeof(line_b),
+                 "local %.96s",
+                 g_layer3_apps.voice.local_path[0] ? g_layer3_apps.voice.local_path : "/tabforge/audio");
+        add_app_status_line(card, "Capture", line_a, width - 32, 0xb982ff);
+        add_app_status_line(card, "Preserve", line_b, width - 32, 0xf1f7f3);
+        add_app_status_line(card, "Ingest", g_layer3_apps.voice.status, width - 32, 0xffc857);
+        add_app_status_line(card, "Flow", "WAV -> authenticated Scribe ingest -> transcription; never delete the local WAV on upload failure.", width - 32, 0x93a6ad);
+        break;
     case APP_WIFI:
         format_wifi_status(line_a, sizeof(line_a));
         format_wifi_scan_status(line_b, sizeof(line_b));
@@ -9497,10 +9698,18 @@ static void render_active_app_page_locked(void)
     case APP_STORE:
         render_app_store_locked(card, width - 32);
         break;
-    case APP_UPDATE:
-        snprintf(line_a, sizeof(line_a), "%s | manifest %s",
-                 ota_state_text(),
-                 g_ota_manifest_url[0] ? "configured" : "missing");
+    case APP_UPDATE: {
+        refresh_layered_ota_status();
+        uint32_t ota_percent = g_ota_size > 0U
+                                   ? (uint32_t)(((uint64_t)g_ota_downloaded_size * 100ULL) / g_ota_size)
+                                   : 0U;
+        if (ota_percent > 100U) {
+            ota_percent = 100U;
+        }
+        snprintf(line_a, sizeof(line_a), "%s | %lu%% | manifest %s",
+                  ota_state_text(),
+                  (unsigned long)ota_percent,
+                  g_ota_manifest_url[0] ? "configured" : "missing");
         snprintf(line_b, sizeof(line_b), "remote %s | running %s",
                  g_ota_version[0] ? g_ota_version : "unknown",
                  TABFORGE_VERSION);
@@ -9508,7 +9717,13 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "OTA", line_a, width - 32, 0xffc857);
         add_app_status_line(card, "Version", line_b, width - 32, 0xf1f7f3);
         add_app_status_line(card, "SHA256", line_c, width - 32, 0x93a6ad);
+        add_app_status_line(card,
+                            "Recovery",
+                            g_layer3_apps.ota.status,
+                            width - 32,
+                            g_layer3_apps.ota.signature_verification_available ? 0x77dd88 : 0xffc857);
         break;
+    }
     case APP_NONE:
     default:
         add_app_status_line(card, "Launcher", "Choose an app from Home.", width - 32, 0xf1f7f3);
@@ -10769,6 +10984,11 @@ static void heartbeat_task(void *arg)
 
 void app_main(void)
 {
+    tabforge_device_data_init(&g_layer1_device, "tabforge-tab5", TABFORGE_VERSION);
+    tabforge_shell_init(&g_layer2_shell);
+    tabforge_apps_init(&g_layer3_apps);
+    tabforge_tasks_set_status(&g_layer3_apps, false, false, false, 0U, 0U);
+    refresh_layered_ota_status();
     init_nvs();
     init_json_allocator();
     load_screen_settings();
@@ -10786,6 +11006,7 @@ void app_main(void)
         bsp_display_rotate(g_display, g_rotation);
         lv_indev_t *touch = bsp_display_get_input_dev();
         if (touch != NULL) {
+            g_layer1_device.touch_ready = true;
             lv_indev_add_event_cb(touch, input_activity_event_cb, LV_EVENT_ALL, NULL);
         }
         lv_obj_t *screen = lv_display_get_screen_active(g_display);

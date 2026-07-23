@@ -23,10 +23,12 @@ This repo is intentionally split into a Tab5 shell and companion-device profiles
 
 Included now:
 
+- A source-preserving three-layer Tab5 architecture: hardware/device data, shell/menu/clock/battery/theme/save feedback, and apps/pages.
+- Dashboard placeholder cards, plus explicit authenticated API boundaries for Scribe Tasks and normal Scribe voice-memo ingest. These do not write directly to either application's database.
 - ESP-IDF Tab5 firmware shell with OTA partitions and a feature registry.
 - Android-style Tab5 launcher with a slim status bar, home/quick-status panel, icon app grid, bottom navigation, live SD/USB/mic/add-on stats, and gyro-assisted auto-rotation.
 - Boot-time add-on bring-up for the Tab5 expansion 5V rail, USB-A host power, USB CDC scan/read counters, corrected Grove IR pins, and a passive Grove UART RX counter for C6L-style serial traffic.
-- RTL-SDR app tile and GitHub app package with USB descriptor detection for common RTL2832/RTL2838 receivers.
+- Receive-only RTL-SDR app tile and GitHub app package with USB descriptor detection for common RTL2832/RTL2838 receivers. DSP and flight-tracking views remain future modules.
 - Cardputer controller app tile and GitHub app package with Grove UART/USB CDC JSON key events, app switching, and Mesh/Units/IR/SDR/Store/Recorder/Files shortcuts.
 - Feature catalog for mesh, IR, mic/audio, T-Deck, C6L, USB host, SD, camera, IMU, RS485, and updates.
 - Meshtastic/MeshCore mode-switch contract.
@@ -83,7 +85,7 @@ The script writes `docs\downloads\tabforge-companion-0.1.0-debug.apk` for the Gi
 3. Keep C6L on official Meshtastic first and connect it to the Tab5 by USB host.
 4. Use TabForge `Mesh > C6L > Meshtastic` to read node status and send a test message.
 5. Switch the C6L profile to MeshCore only after backing up its current radio image/config.
-6. Use `Update` from the Tab5 to read the Pages manifest and apply a signed/hash-checked TabForge update.
+6. Use `Update` from the Tab5 to read the HTTPS Pages manifest and apply a SHA256-checked TabForge update. Rollback partitions are enabled. Firmware-signature enforcement remains blocked until an offline signing key and recovery procedure are provisioned.
 
 ## Public-Safe Boundary
 
