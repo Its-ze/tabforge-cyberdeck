@@ -71,5 +71,9 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=1024
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=1536
-CONFIG_FREERTOS_SUPPORT_STATIC_ALLOCATION=y
+# ESP32-P4 release-v5.4 can exhaust internal memory while creating the
+# statically allocated timer task after ESP-Hosted has reserved its early
+# worker stacks. Let FreeRTOS create the idle/timer tasks dynamically so the
+# scheduler can start instead of boot-looping before app_main.
+# CONFIG_FREERTOS_SUPPORT_STATIC_ALLOCATION is not set
 CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
