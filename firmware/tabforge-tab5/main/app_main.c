@@ -11051,7 +11051,9 @@ void app_main(void)
                             psram_stack_caps) != pdPASS) {
         ESP_LOGE(TABFORGE_TAG, "heartbeat worker task allocation failed");
     }
-    if (xTaskCreateWithCaps(accessory_auto_power_task, "tabforge-accessory-power", 2048, NULL, 4, NULL,
+    // This worker powers the rails, probes both buses, logs to SD, and refreshes
+    // LVGL in one pass. Keep enough stack for the combined driver call chain.
+    if (xTaskCreateWithCaps(accessory_auto_power_task, "tabforge-accessory-power", 6144, NULL, 4, NULL,
                             psram_stack_caps) != pdPASS) {
         ESP_LOGE(TABFORGE_TAG, "accessory power task allocation failed");
     }
