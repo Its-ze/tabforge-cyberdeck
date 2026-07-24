@@ -61,6 +61,9 @@
 #ifndef LV_SYMBOL_EYE_OPEN
 #define LV_SYMBOL_EYE_OPEN "[IR]"
 #endif
+#ifndef LV_SYMBOL_EYE_CLOSE
+#define LV_SYMBOL_EYE_CLOSE "[RMT]"
+#endif
 #ifndef LV_SYMBOL_AUDIO
 #define LV_SYMBOL_AUDIO "[MIC]"
 #endif
@@ -161,6 +164,7 @@
 #define TABFORGE_BATTERY_POLL_MS 10000
 #define TABFORGE_NVS_NAMESPACE "tabforge"
 #define TABFORGE_NVS_SCREEN_TIMEOUT_KEY "scr_to_idx"
+#define TABFORGE_NVS_BRIGHTNESS_KEY "brightness"
 #define TABFORGE_NVS_WIFI_SSID_KEY "wifi_ssid"
 #define TABFORGE_NVS_WIFI_PASS_KEY "wifi_pass"
 #define TABFORGE_NVS_MOBILE_BASE_KEY "mb_ctrl_key"
@@ -377,6 +381,10 @@ typedef struct {
     lv_obj_t *ir_label;
     lv_obj_t *gyro_label;
     lv_obj_t *rotation_label;
+    lv_obj_t *remote_indicator;
+    lv_obj_t *brightness_slider;
+    lv_obj_t *brightness_label;
+    lv_obj_t *capture_flash;
     lv_obj_t *activity_title_label;
     lv_obj_t *activity_detail_label;
     lv_obj_t *module_popup;
@@ -838,6 +846,9 @@ static uint32_t g_screen_sleep_count;
 static uint32_t g_screen_sleep_start_ms;
 static bool g_screen_dimmed;
 static uint32_t g_screen_dim_start_ms;
+static uint8_t g_user_brightness = 70;
+static bool g_capture_flash_requested;
+static uint32_t g_remote_activity_until_ms;
 static volatile uint32_t g_input_activity_seq;
 static uint32_t g_sleep_input_seq;
 static bool g_wifi_started;
@@ -924,6 +935,8 @@ static bool gps_stream_ingest(const char *source, const uint8_t *data, size_t da
 static bool roadscout_sensor_ingest(const char *source, const uint8_t *data, size_t data_len);
 static void apply_cardputer_pending_command_locked(void);
 static void apply_cardputer_pending_input_locked(void);
+static void brightness_slider_event_cb(lv_event_t *event);
+static void trigger_capture_flash_locked(void);
 static const feature_tile_t *find_tile_by_app(app_id_t app_id);
 static void start_companion_api_server(void);
 static axis3_t g_last_acce;
@@ -1562,6 +1575,14 @@ static void load_screen_settings(void)
         ESP_LOGW(TABFORGE_TAG, "screen timeout setting invalid: %s", esp_err_to_name(err));
     }
 
+    uint8_t saved_brightness = g_user_brightness;
+    err = nvs_get_u8(handle, TABFORGE_NVS_BRIGHTNESS_KEY, &saved_brightness);
+    if (err == ESP_OK && saved_brightness >= 5U && saved_brightness <= 100U) {
+        g_user_brightness = saved_brightness;
+    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TABFORGE_TAG, "brightness setting invalid: %s", esp_err_to_name(err));
+    }
+
     nvs_close(handle);
 }
 
@@ -1588,13 +1609,40 @@ static void save_screen_timeout_setting(void)
     tabforge_shell_save_finish(&g_layer2_shell, "Screen timeout", err == ESP_OK, now_ms_u32());
 }
 
+static void save_brightness_setting(void)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(TABFORGE_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(handle, TABFORGE_NVS_BRIGHTNESS_KEY, g_user_brightness);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    if (handle != 0) {
+        nvs_close(handle);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TABFORGE_TAG, "brightness save failed: %s", esp_err_to_name(err));
+    } else {
+        append_event("brightness_saved");
+        ESP_LOGI(TABFORGE_TAG, "brightness saved: %u%%", (unsigned)g_user_brightness);
+    }
+}
+
+static uint8_t dim_brightness(void)
+{
+    uint8_t dimmed = (uint8_t)((g_user_brightness + 7U) / 8U);
+    return dimmed < 5U ? 5U : dimmed;
+}
+
 static void enter_screen_dim(const char *event_name)
 {
     if (g_screen_sleeping || g_screen_dimmed) {
         return;
     }
 
-    esp_err_t err = bsp_display_brightness_set(12);
+    esp_err_t err = bsp_display_brightness_set(dim_brightness());
     g_screen_power_error = err;
     if (err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "screen dim failed: %s", esp_err_to_name(err));
@@ -1613,7 +1661,7 @@ static void exit_screen_dim(const char *event_name)
         return;
     }
 
-    esp_err_t err = bsp_display_brightness_set(100);
+    esp_err_t err = bsp_display_brightness_set(g_user_brightness);
     g_screen_power_error = err;
     if (err != ESP_OK) {
         ESP_LOGW(TABFORGE_TAG, "screen undim failed: %s", esp_err_to_name(err));
@@ -1661,7 +1709,7 @@ static void exit_screen_sleep(const char *event_name)
         ESP_LOGW(TABFORGE_TAG, "screen wake failed: %s", esp_err_to_name(err));
         return;
     }
-    bsp_display_brightness_set(100);
+    bsp_display_brightness_set(g_user_brightness);
 
     g_screen_sleeping = false;
     g_screen_dimmed = false;
@@ -3066,6 +3114,7 @@ static bool card_display_tabforge_is_remote(const char *tabforge)
            (strcmp(tabforge, "cardputer.remote.pair") == 0 ||
             strcmp(tabforge, "cardputer.remote.start") == 0 ||
             strcmp(tabforge, "cardputer.remote.frame") == 0 ||
+            strcmp(tabforge, "cardputer.remote.screenshot") == 0 ||
             strcmp(tabforge, "cardputer.remote.end") == 0 ||
             strcmp(tabforge, "cardputer.remote.wifi") == 0 ||
             strcmp(tabforge, "cardputer.remote.compute") == 0 ||
@@ -3153,6 +3202,7 @@ static bool card_display_handle_json_line(const char *source, cJSON *root, const
     }
 
     g_card_display_last_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    g_remote_activity_until_ms = now_ms_u32() + 4000U;
     strlcpy(g_card_display_source, source != NULL ? source : "unknown", sizeof(g_card_display_source));
     strlcpy(g_card_display_device, device[0] != '\0' ? device : "cardputer", sizeof(g_card_display_device));
     if (title[0] != '\0') {
@@ -3168,10 +3218,18 @@ static bool card_display_handle_json_line(const char *source, cJSON *root, const
     bool wants_wifi = strcmp(tabforge, "cardputer.remote.wifi") == 0 ||
                       strcmp(request, "wifi-scan") == 0 ||
                       strcmp(request, "wifi") == 0;
+    bool wants_screenshot = strcmp(tabforge, "cardputer.remote.screenshot") == 0 ||
+                            strcmp(request, "screenshot") == 0 ||
+                            strcmp(request, "snapshot") == 0;
     bool wants_compute = strcmp(tabforge, "cardputer.remote.compute") == 0 ||
                          strcmp(request, "compute") == 0 ||
                          strcmp(request, "helper") == 0;
-    if (wants_wifi) {
+    if (wants_screenshot) {
+        g_capture_flash_requested = true;
+        g_card_display_frame_count++;
+        card_display_send_response(source, "screenshot", "Screenshot feedback shown.");
+        append_event("card_display_screenshot");
+    } else if (wants_wifi) {
         g_card_display_wifi_requests++;
         xTaskCreate(wifi_scan_task, "tabforge-card-wifi", 6144, NULL, 5, NULL);
         snprintf(g_card_display_status, sizeof(g_card_display_status), "Tab Wi-Fi scan requested for Cardputer.");
@@ -3284,6 +3342,7 @@ static void tabforge_ble_link_changed(bool connected)
 {
     card_display_ensure_pair_code();
     if (connected) {
+        g_remote_activity_until_ms = now_ms_u32() + 4000U;
         snprintf(g_card_display_status,
                  sizeof(g_card_display_status),
                  "Cardputer Bluetooth detected. Enter code %.7s to authorize.",
@@ -3740,6 +3799,54 @@ static void refresh_nav_styles(void)
     style_nav_button(&g_ui.nav_update, g_nav_page == NAV_PAGE_UPDATE, 0xffc857);
 }
 
+static void ui_anim_set_x(void *object, int32_t value)
+{
+    lv_obj_set_x((lv_obj_t *)object, (lv_coord_t)value);
+}
+
+static void ui_anim_set_opa(void *object, int32_t value)
+{
+    lv_obj_set_style_opa((lv_obj_t *)object, (lv_opa_t)value, 0);
+}
+
+static void animate_page_enter(lv_obj_t *page)
+{
+    if (page == NULL) return;
+
+    lv_obj_set_x(page, 18);
+    lv_obj_set_style_opa(page, LV_OPA_40, 0);
+
+    lv_anim_t slide;
+    lv_anim_init(&slide);
+    lv_anim_set_var(&slide, page);
+    lv_anim_set_values(&slide, 18, 0);
+    lv_anim_set_duration(&slide, 180);
+    lv_anim_set_exec_cb(&slide, ui_anim_set_x);
+    lv_anim_set_path_cb(&slide, lv_anim_path_ease_out);
+    lv_anim_start(&slide);
+
+    lv_anim_t fade;
+    lv_anim_init(&fade);
+    lv_anim_set_var(&fade, page);
+    lv_anim_set_values(&fade, LV_OPA_40, LV_OPA_COVER);
+    lv_anim_set_duration(&fade, 150);
+    lv_anim_set_exec_cb(&fade, ui_anim_set_opa);
+    lv_anim_start(&fade);
+    ESP_LOGI(TABFORGE_TAG, "page transition animation started");
+}
+
+static void refresh_remote_indicator_locked(void)
+{
+    if (g_ui.remote_indicator == NULL) return;
+
+    bool active = tabforge_ble_connected() || g_card_display_paired ||
+                  (g_remote_activity_until_ms != 0U && now_ms_u32() < g_remote_activity_until_ms);
+    lv_label_set_text(g_ui.remote_indicator, active ? LV_SYMBOL_EYE_OPEN " REMOTE ACTIVE" : LV_SYMBOL_EYE_CLOSE " REMOTE READY");
+    lv_obj_set_style_text_color(g_ui.remote_indicator,
+                                color_hex(active ? 0xffc857 : 0x9fe8ff),
+                                0);
+}
+
 static void show_nav_page(nav_page_t page)
 {
     g_nav_page = page;
@@ -3766,6 +3873,12 @@ static void show_nav_page(nav_page_t page)
     set_obj_hidden(g_ui.page_settings, page != NAV_PAGE_SETTINGS);
     set_obj_hidden(g_ui.page_update, page != NAV_PAGE_UPDATE);
     set_obj_hidden(g_ui.page_app, page != NAV_PAGE_APP);
+    lv_obj_t *visible_page = page == NAV_PAGE_HOME ? g_ui.page_home :
+                             page == NAV_PAGE_APPS ? g_ui.page_apps :
+                             page == NAV_PAGE_SETTINGS ? g_ui.page_settings :
+                             page == NAV_PAGE_UPDATE ? g_ui.page_update :
+                             g_ui.page_app;
+    animate_page_enter(visible_page);
 
     switch (page) {
     case NAV_PAGE_SETTINGS:
@@ -3811,6 +3924,7 @@ static void refresh_mode_widgets(void)
         lv_label_set_text(g_ui.dock_mode_label, g_mesh_module_ready ? selected_mesh_profile_name() : "Mesh");
     }
 
+    refresh_remote_indicator_locked();
     refresh_nav_styles();
 }
 
@@ -4142,6 +4256,10 @@ static void refresh_live_stats_locked(void)
     refresh_mode_widgets();
     refresh_rotation_widgets();
     refresh_module_popup_locked();
+    if (g_capture_flash_requested) {
+        g_capture_flash_requested = false;
+        trigger_capture_flash_locked();
+    }
 }
 
 static void feature_tile_event_cb(lv_event_t *event)
@@ -6216,6 +6334,34 @@ static void wifi_scan_button_event_cb(lv_event_t *event)
         return;
     }
     xTaskCreate(wifi_scan_task, "tabforge-wifi-scan", 6144, NULL, 5, NULL);
+}
+
+static void brightness_slider_event_cb(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    if (code != LV_EVENT_VALUE_CHANGED && code != LV_EVENT_RELEASED) {
+        return;
+    }
+
+    lv_obj_t *slider = lv_event_get_target(event);
+    int32_t value = lv_slider_get_value(slider);
+    if (value < 5) value = 5;
+    if (value > 100) value = 100;
+    g_user_brightness = (uint8_t)value;
+
+    if (g_ui.brightness_label != NULL) {
+        lv_label_set_text_fmt(g_ui.brightness_label, "%u%%", (unsigned)g_user_brightness);
+    }
+    if (!g_screen_sleeping) {
+        esp_err_t err = bsp_display_brightness_set(g_screen_dimmed ? dim_brightness() : g_user_brightness);
+        g_screen_power_error = err;
+    }
+    lv_display_trigger_activity(g_display);
+
+    if (code == LV_EVENT_RELEASED) {
+        save_brightness_setting();
+        set_activity("Brightness", "Display level saved.");
+    }
 }
 
 static void wifi_next_button_event_cb(lv_event_t *event)
@@ -8355,10 +8501,12 @@ static void build_top_bar(lv_obj_t *screen, lv_coord_t width, lv_coord_t height,
     lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    g_ui.status_label = make_text(top, "", 0xffffff, (width * 42) / 100);
-    g_ui.rotation_label = make_text(top, "", 0xdffbff, (width * 32) / 100);
+    g_ui.status_label = make_text(top, "", 0xffffff, (width * 31) / 100);
+    g_ui.remote_indicator = make_text(top, LV_SYMBOL_EYE_CLOSE " REMOTE READY", 0x9fe8ff, (width * 24) / 100);
+    lv_obj_set_style_text_align(g_ui.remote_indicator, LV_TEXT_ALIGN_CENTER, 0);
+    g_ui.rotation_label = make_text(top, "", 0xdffbff, (width * 25) / 100);
     lv_obj_set_style_text_align(g_ui.rotation_label, LV_TEXT_ALIGN_RIGHT, 0);
-    g_ui.battery_label = make_text(top, "BAT --", 0xffffff, (width * 18) / 100);
+    g_ui.battery_label = make_text(top, "BAT --", 0xffffff, (width * 14) / 100);
     lv_obj_set_style_text_align(g_ui.battery_label, LV_TEXT_ALIGN_RIGHT, 0);
 }
 
@@ -8707,9 +8855,30 @@ static lv_obj_t *add_info_tile(lv_obj_t *parent,
 
 static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t height, bool landscape)
 {
+    lv_obj_add_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(page, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(page, 10, 0);
+
+    lv_obj_t *brightness = make_panel(page, width, 68, 0x11181d, 0xffc857);
+    lv_obj_clear_flag(brightness, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(brightness, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(brightness, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(brightness, 10, 0);
+    make_text(brightness, "Brightness", 0xf1f7f3, 92);
+    g_ui.brightness_slider = lv_slider_create(brightness);
+    lv_obj_set_size(g_ui.brightness_slider, width - 196, 22);
+    lv_slider_set_range(g_ui.brightness_slider, 5, 100);
+    lv_slider_set_value(g_ui.brightness_slider, g_user_brightness, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(g_ui.brightness_slider, color_hex(0x26343b), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_ui.brightness_slider, color_hex(0xffc857), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(g_ui.brightness_slider, color_hex(0xf1f7f3), LV_PART_KNOB);
+    lv_obj_add_event_cb(g_ui.brightness_slider, brightness_slider_event_cb, LV_EVENT_ALL, NULL);
+    g_ui.brightness_label = make_text(brightness, "", 0xffc857, 64);
+    lv_label_set_text_fmt(g_ui.brightness_label, "%u%%", (unsigned)g_user_brightness);
+    lv_obj_set_style_text_align(g_ui.brightness_label, LV_TEXT_ALIGN_RIGHT, 0);
 
     lv_coord_t controls_h = landscape ? 164 : 216;
     lv_obj_t *controls = lv_obj_create(page);
@@ -8733,7 +8902,9 @@ static void build_settings_page(lv_obj_t *page, lv_coord_t width, lv_coord_t hei
 
     lv_obj_t *grid = lv_obj_create(page);
     lv_obj_remove_style_all(grid);
-    lv_obj_set_size(grid, width, height - controls_h - 10);
+    lv_coord_t grid_h = landscape ? 292 : height - controls_h - 88;
+    if (grid_h < 292) grid_h = 292;
+    lv_obj_set_size(grid, width, grid_h);
     lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
@@ -9860,6 +10031,46 @@ static void build_module_popup(lv_obj_t *screen, lv_coord_t screen_w)
     lv_obj_move_foreground(g_ui.module_popup);
 }
 
+static void capture_flash_ready(lv_anim_t *animation)
+{
+    (void)animation;
+    if (g_ui.capture_flash != NULL) {
+        lv_obj_add_flag(g_ui.capture_flash, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void build_capture_flash(lv_obj_t *screen, lv_coord_t width, lv_coord_t height)
+{
+    g_ui.capture_flash = lv_obj_create(screen);
+    lv_obj_remove_style_all(g_ui.capture_flash);
+    lv_obj_set_size(g_ui.capture_flash, width, height);
+    lv_obj_set_pos(g_ui.capture_flash, 0, 0);
+    lv_obj_set_style_bg_color(g_ui.capture_flash, color_hex(0xffffff), 0);
+    lv_obj_set_style_bg_opa(g_ui.capture_flash, LV_OPA_COVER, 0);
+    lv_obj_set_style_opa(g_ui.capture_flash, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(g_ui.capture_flash, LV_OBJ_FLAG_FLOATING);
+    lv_obj_add_flag(g_ui.capture_flash, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void trigger_capture_flash_locked(void)
+{
+    if (g_ui.capture_flash == NULL) return;
+
+    lv_obj_clear_flag(g_ui.capture_flash, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_ui.capture_flash);
+    lv_obj_set_style_opa(g_ui.capture_flash, LV_OPA_70, 0);
+
+    lv_anim_t flash;
+    lv_anim_init(&flash);
+    lv_anim_set_var(&flash, g_ui.capture_flash);
+    lv_anim_set_values(&flash, LV_OPA_70, LV_OPA_TRANSP);
+    lv_anim_set_duration(&flash, 220);
+    lv_anim_set_exec_cb(&flash, ui_anim_set_opa);
+    lv_anim_set_ready_cb(&flash, capture_flash_ready);
+    lv_anim_start(&flash);
+    ESP_LOGI(TABFORGE_TAG, "screenshot feedback animation started");
+}
+
 static void build_dashboard(lv_obj_t *screen)
 {
     memset(&g_ui, 0, sizeof(g_ui));
@@ -9895,6 +10106,7 @@ static void build_dashboard(lv_obj_t *screen)
     build_side_rail(workspace, rail_w, workspace_h);
     build_body(workspace, body_w, workspace_h, landscape);
     build_module_popup(screen, screen_w);
+    build_capture_flash(screen, screen_w, screen_h);
     show_nav_page(g_nav_page);
 
     refresh_live_stats_locked();
@@ -11008,6 +11220,8 @@ void app_main(void)
 
     g_display = bsp_display_start();
     bsp_display_backlight_on();
+    bsp_display_brightness_set(g_user_brightness);
+    ESP_LOGI(TABFORGE_TAG, "user brightness applied: %u%%", (unsigned)g_user_brightness);
 
     if (bsp_display_lock(0)) {
         bsp_display_rotate(g_display, g_rotation);
