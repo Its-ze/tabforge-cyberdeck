@@ -48,6 +48,9 @@ CONFIG_ESP_HOSTED_SDIO_RESET_DELAY_MS=1800
 # Preserve internal RAM for the FreeRTOS scheduler and DMA-only drivers. The
 # Hosted workers are safe to place in Tab5's 32 MB PSRAM.
 CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y
+# ESP32-P4 GDMA can reach PSRAM. Keep Hosted's 48 KB transport pool there so
+# the SD card and USB host retain contiguous internal DMA buffers.
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
 CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 # Tab5's P4 has no radio, so NimBLE uses the C6 controller over ESP-Hosted VHCI.
 CONFIG_BT_ENABLED=y
