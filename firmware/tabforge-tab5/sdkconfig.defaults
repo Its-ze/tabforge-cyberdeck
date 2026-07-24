@@ -45,6 +45,10 @@ CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D2_4BIT_BUS_SLOT_1=9
 CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1=8
 CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=15
 CONFIG_ESP_HOSTED_SDIO_RESET_DELAY_MS=1800
+# Preserve internal RAM for the FreeRTOS scheduler and DMA-only drivers. The
+# Hosted workers are safe to place in Tab5's 32 MB PSRAM.
+CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 # Tab5's P4 has no radio, so NimBLE uses the C6 controller over ESP-Hosted VHCI.
 CONFIG_BT_ENABLED=y
 CONFIG_BT_CONTROLLER_DISABLED=y
@@ -70,9 +74,4 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=1024
-# TabForge uses esp_timer; it does not use the FreeRTOS software-timer API.
-# ESP-Hosted consumes the available pre-scheduler internal heap on this Tab5,
-# so creating the otherwise-unused timer service task boot-loops before
-# app_main with vApplicationGetTimerTaskMemory allocation failure.
-# CONFIG_FREERTOS_USE_TIMERS is not set
 CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
