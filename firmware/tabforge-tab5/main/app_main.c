@@ -1738,6 +1738,7 @@ static void load_wifi_credentials_from_nvs(void)
     bool have_ssid = nvs_get_str(handle, TABFORGE_NVS_WIFI_SSID_KEY, g_wifi_credentials.ssid, &ssid_len) == ESP_OK;
     bool have_pass = nvs_get_str(handle, TABFORGE_NVS_WIFI_PASS_KEY, g_wifi_credentials.password, &pass_len) == ESP_OK;
     g_wifi_credentials.configured = have_ssid && g_wifi_credentials.ssid[0] != '\0';
+    g_wifi_credentials.auto_connect = g_wifi_credentials.configured;
     if (have_pass) {
         g_wifi_credentials.password[sizeof(g_wifi_credentials.password) - 1] = '\0';
     }
@@ -1843,14 +1844,20 @@ static void load_runtime_config(void)
 
     cJSON *wifi = cJSON_GetObjectItemCaseSensitive(root, "wifi");
     if (cJSON_IsObject(wifi)) {
-        copy_json_string(wifi, "ssid", g_wifi_credentials.ssid, sizeof(g_wifi_credentials.ssid));
-        copy_json_string(wifi, "password", g_wifi_credentials.password, sizeof(g_wifi_credentials.password));
-        cJSON *auto_connect = cJSON_GetObjectItemCaseSensitive(wifi, "autoConnect");
-        if (cJSON_IsBool(auto_connect)) {
-            g_wifi_credentials.auto_connect = cJSON_IsTrue(auto_connect);
-        }
-        g_wifi_credentials.configured = g_wifi_credentials.ssid[0] != '\0';
-        if (g_wifi_credentials.configured) {
+        char configured_ssid[TABFORGE_WIFI_MAX_SSID] = "";
+        char configured_password[TABFORGE_WIFI_MAX_PASSWORD] = "";
+        copy_json_string(wifi, "ssid", configured_ssid, sizeof(configured_ssid));
+        copy_json_string(wifi, "password", configured_password, sizeof(configured_password));
+
+        // A blank SD template is not a request to discard credentials that the
+        // operator already saved from the tablet. Only a populated SD entry
+        // overrides NVS, and saved credentials reconnect automatically.
+        if (configured_ssid[0] != '\0') {
+            strlcpy(g_wifi_credentials.ssid, configured_ssid, sizeof(g_wifi_credentials.ssid));
+            strlcpy(g_wifi_credentials.password, configured_password, sizeof(g_wifi_credentials.password));
+            g_wifi_credentials.configured = true;
+            cJSON *auto_connect = cJSON_GetObjectItemCaseSensitive(wifi, "autoConnect");
+            g_wifi_credentials.auto_connect = !cJSON_IsBool(auto_connect) || cJSON_IsTrue(auto_connect);
             save_wifi_credentials_to_nvs();
         }
     }
