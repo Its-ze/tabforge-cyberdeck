@@ -9824,6 +9824,18 @@ static void render_active_app_page_locked(void)
         add_app_status_line(card, "Pair", line_a, width - 32, g_card_display_paired ? 0x77dd88 : 0xffc857);
         add_app_status_line(card, "Link", line_b, width - 32, 0x22d3ee);
         add_app_status_line(card, "Offload", line_c, width - 32, 0xf1f7f3);
+        esp_err_t ble_error = tabforge_ble_last_error();
+        snprintf(line_c,
+                 sizeof(line_c),
+                 "%s | attempts %lu | %s",
+                 tabforge_ble_status_text(),
+                 (unsigned long)tabforge_ble_start_attempts(),
+                 esp_err_to_name(ble_error));
+        add_app_status_line(card,
+                            "Bluetooth",
+                            line_c,
+                            width - 32,
+                            ble_error == ESP_OK ? 0x77dd88 : 0xffc857);
         add_app_status_line(card, "Title", g_card_display_title, width - 32, 0x22d3ee);
         add_app_status_line(card, "Remote", g_card_display_body, width - 32, 0xf1f7f3);
         add_app_status_line(card, "Status", g_card_display_status, width - 32, g_card_display_paired ? 0x77dd88 : 0x93a6ad);
@@ -11180,7 +11192,7 @@ static void heartbeat_task(void *arg)
     while (true) {
         char battery_status[32];
         format_battery_status(battery_status, sizeof(battery_status), false);
-        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s usb=%s grove=%s ir=%s screen=%s timeout=%s sleeps=%lu charge=%s bat=%s wifi=%s rotation=%s",
+        ESP_LOGI(TABFORGE_TAG, "heartbeat=%lu mode=%s sd=%s imu=%s mic=%s usb=%s grove=%s ir=%s screen=%s timeout=%s sleeps=%lu charge=%s bat=%s wifi=%s rotation=%s ble=%s/%s attempts=%lu",
                  (unsigned long)g_heartbeat_count++,
                  active_mode_name(),
                  g_sd_ready ? (g_sd_recovered ? "recovered" : "ready") : "missing",
@@ -11195,7 +11207,10 @@ static void heartbeat_task(void *arg)
                  g_charge_enable_ready ? "on" : "err",
                  battery_status,
                  wifi_state_text(),
-                 rotation_name(g_rotation));
+                 rotation_name(g_rotation),
+                 tabforge_ble_status_text(),
+                 esp_err_to_name(tabforge_ble_last_error()),
+                 (unsigned long)tabforge_ble_start_attempts());
         append_event("heartbeat");
         vTaskDelay(pdMS_TO_TICKS(30000));
     }
@@ -11248,9 +11263,17 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(50));
     esp_err_t ble_err = tabforge_ble_start(tabforge_ble_rx_line, tabforge_ble_link_changed);
     if (ble_err != ESP_OK) {
-        ESP_LOGW(TABFORGE_TAG, "TabForge Bluetooth start failed: %s", esp_err_to_name(ble_err));
+        ESP_LOGW(TABFORGE_TAG,
+                 "TabForge Bluetooth start failed: %s status=%s attempts=%lu",
+                 esp_err_to_name(ble_err),
+                 tabforge_ble_status_text(),
+                 (unsigned long)tabforge_ble_start_attempts());
         append_event("tabforge_ble_start_failed");
     } else {
+        ESP_LOGI(TABFORGE_TAG,
+                 "TabForge Bluetooth start accepted: status=%s attempts=%lu",
+                 tabforge_ble_status_text(),
+                 (unsigned long)tabforge_ble_start_attempts());
         append_event("tabforge_ble_started");
     }
     vTaskDelay(pdMS_TO_TICKS(50));

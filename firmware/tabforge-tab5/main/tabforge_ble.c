@@ -22,6 +22,17 @@
 #define TF_BLE_PACKET_MAX 384
 #define TF_BLE_RESPONSE_MAX 256
 #define TF_BLE_QUEUE_DEPTH 8
+#define TF_BLE_HOSTED_CONNECT_ATTEMPTS 4
+#define TF_BLE_HOSTED_RETRY_BASE_MS 500
+
+typedef enum {
+    TF_BLE_STATUS_IDLE = 0,
+    TF_BLE_STATUS_CONNECTING,
+    TF_BLE_STATUS_INITIALIZING,
+    TF_BLE_STATUS_ADVERTISING,
+    TF_BLE_STATUS_CONNECTED,
+    TF_BLE_STATUS_FAILED,
+} tf_ble_status_t;
 
 typedef enum {
     TF_BLE_EVENT_RX = 0,
@@ -60,6 +71,29 @@ static bool s_synced;
 static bool s_connected;
 static uint32_t s_rx_packets;
 static uint32_t s_connections;
+static tf_ble_status_t s_status = TF_BLE_STATUS_IDLE;
+static esp_err_t s_last_error = ESP_OK;
+static uint32_t s_start_attempts;
+
+static void set_status(tf_ble_status_t status, esp_err_t error)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_status = status;
+    s_last_error = error;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static esp_err_t fail_start(esp_err_t error)
+{
+    if (s_event_queue) {
+        vQueueDelete(s_event_queue);
+        s_event_queue = NULL;
+    }
+    s_rx_cb = NULL;
+    s_link_cb = NULL;
+    set_status(TF_BLE_STATUS_FAILED, error);
+    return error;
+}
 
 static void queue_link_event(tf_ble_event_kind_t kind)
 {
@@ -145,6 +179,8 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             s_conn_handle = event->connect.conn_handle;
             s_connected = true;
             s_connections++;
+            s_status = TF_BLE_STATUS_CONNECTED;
+            s_last_error = ESP_OK;
             portEXIT_CRITICAL(&s_lock);
             queue_link_event(TF_BLE_EVENT_CONNECTED);
             ESP_LOGI(TAG, "Cardputer BLE link connected handle=%u", event->connect.conn_handle);
@@ -196,6 +232,7 @@ static void advertise(void)
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "BLE advertising fields failed rc=%d", rc);
+        set_status(TF_BLE_STATUS_FAILED, ESP_FAIL);
         return;
     }
 
@@ -206,6 +243,7 @@ static void advertise(void)
     rc = ble_gap_adv_rsp_set_fields(&response);
     if (rc != 0) {
         ESP_LOGE(TAG, "BLE scan response failed rc=%d", rc);
+        set_status(TF_BLE_STATUS_FAILED, ESP_FAIL);
         return;
     }
 
@@ -215,7 +253,9 @@ static void advertise(void)
     rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &params, gap_event_cb, NULL);
     if (rc != 0 && rc != BLE_HS_EALREADY) {
         ESP_LOGE(TAG, "BLE advertising start failed rc=%d", rc);
+        set_status(TF_BLE_STATUS_FAILED, ESP_FAIL);
     } else {
+        set_status(TF_BLE_STATUS_ADVERTISING, ESP_OK);
         ESP_LOGI(TAG, "BLE advertising as %s", TF_BLE_NAME);
     }
 }
@@ -223,6 +263,7 @@ static void advertise(void)
 static void on_reset(int reason)
 {
     s_synced = false;
+    set_status(TF_BLE_STATUS_FAILED, ESP_FAIL);
     ESP_LOGW(TAG, "NimBLE reset reason=%d", reason);
 }
 
@@ -232,6 +273,7 @@ static void on_sync(void)
     if (rc == 0) rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
     if (rc != 0) {
         ESP_LOGE(TAG, "NimBLE address setup failed rc=%d", rc);
+        set_status(TF_BLE_STATUS_FAILED, ESP_FAIL);
         return;
     }
     s_synced = true;
@@ -270,14 +312,40 @@ esp_err_t tabforge_ble_start(tabforge_ble_rx_cb_t rx_cb, tabforge_ble_link_cb_t 
     if (s_event_queue) return ESP_ERR_INVALID_STATE;
     s_rx_cb = rx_cb;
     s_link_cb = link_cb;
-    s_event_queue = xQueueCreate(TF_BLE_QUEUE_DEPTH, sizeof(tf_ble_event_t));
-    if (!s_event_queue) return ESP_ERR_NO_MEM;
+    portENTER_CRITICAL(&s_lock);
+    s_start_attempts = 0;
+    portEXIT_CRITICAL(&s_lock);
 
-    esp_err_t err = esp_hosted_connect_to_slave();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ESP-Hosted slave connection failed: %s", esp_err_to_name(err));
-        return err;
+    esp_err_t err = ESP_FAIL;
+    for (uint32_t attempt = 1; attempt <= TF_BLE_HOSTED_CONNECT_ATTEMPTS; attempt++) {
+        portENTER_CRITICAL(&s_lock);
+        s_start_attempts = attempt;
+        s_status = TF_BLE_STATUS_CONNECTING;
+        s_last_error = ESP_OK;
+        portEXIT_CRITICAL(&s_lock);
+
+        err = esp_hosted_connect_to_slave();
+        if (err == ESP_OK) break;
+
+        set_status(TF_BLE_STATUS_CONNECTING, err);
+        ESP_LOGW(TAG,
+                 "ESP-Hosted slave connection attempt %lu/%u failed: %s",
+                 (unsigned long)attempt,
+                 TF_BLE_HOSTED_CONNECT_ATTEMPTS,
+                 esp_err_to_name(err));
+        if (attempt < TF_BLE_HOSTED_CONNECT_ATTEMPTS) {
+            vTaskDelay(pdMS_TO_TICKS(TF_BLE_HOSTED_RETRY_BASE_MS * attempt));
+        }
     }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "ESP-Hosted slave connection failed after %u attempts: %s",
+                 TF_BLE_HOSTED_CONNECT_ATTEMPTS,
+                 esp_err_to_name(err));
+        return fail_start(err);
+    }
+
+    set_status(TF_BLE_STATUS_INITIALIZING, ESP_OK);
     err = esp_hosted_bt_controller_init();
     if (err != ESP_OK) {
         /* M5Stack's factory C6 image predates hosted feature-control RPCs and
@@ -289,13 +357,13 @@ esp_err_t tabforge_ble_start(tabforge_ble_rx_cb_t rx_cb, tabforge_ble_link_cb_t 
         err = esp_hosted_bt_controller_enable();
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Hosted Bluetooth controller enable failed: %s", esp_err_to_name(err));
-            return err;
+            return fail_start(err);
         }
     }
     err = nimble_port_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NimBLE init failed: %s", esp_err_to_name(err));
-        return err;
+        return fail_start(err);
     }
 
     ble_hs_cfg.reset_cb = on_reset;
@@ -317,11 +385,18 @@ esp_err_t tabforge_ble_start(tabforge_ble_rx_cb_t rx_cb, tabforge_ble_link_cb_t 
     if (rc == 0) rc = ble_gatts_add_svcs(s_gatt_services);
     if (rc != 0) {
         ESP_LOGE(TAG, "GATT service registration failed rc=%d", rc);
-        return ESP_FAIL;
+        return fail_start(ESP_FAIL);
     }
 
+    /*
+     * Allocate the application queue only after hosted/controller/NimBLE setup.
+     * A failed hosted attempt therefore leaves no stale queue that would make a
+     * later tabforge_ble_start() call return ESP_ERR_INVALID_STATE.
+     */
+    s_event_queue = xQueueCreate(TF_BLE_QUEUE_DEPTH, sizeof(tf_ble_event_t));
+    if (!s_event_queue) return fail_start(ESP_ERR_NO_MEM);
     if (xTaskCreate(event_task, "tabforge-ble-events", 6144, NULL, 5, NULL) != pdPASS) {
-        return ESP_ERR_NO_MEM;
+        return fail_start(ESP_ERR_NO_MEM);
     }
     nimble_port_freertos_init(host_task);
     return ESP_OK;
@@ -348,6 +423,39 @@ bool tabforge_ble_connected(void)
     bool connected = s_connected;
     portEXIT_CRITICAL(&s_lock);
     return connected;
+}
+
+const char *tabforge_ble_status_text(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    tf_ble_status_t status = s_status;
+    portEXIT_CRITICAL(&s_lock);
+    switch (status) {
+    case TF_BLE_STATUS_CONNECTING: return "connecting";
+    case TF_BLE_STATUS_INITIALIZING: return "initializing";
+    case TF_BLE_STATUS_ADVERTISING: return "advertising";
+    case TF_BLE_STATUS_CONNECTED: return "connected";
+    case TF_BLE_STATUS_FAILED: return "failed";
+    case TF_BLE_STATUS_IDLE:
+    default:
+        return "idle";
+    }
+}
+
+esp_err_t tabforge_ble_last_error(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    esp_err_t error = s_last_error;
+    portEXIT_CRITICAL(&s_lock);
+    return error;
+}
+
+uint32_t tabforge_ble_start_attempts(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    uint32_t attempts = s_start_attempts;
+    portEXIT_CRITICAL(&s_lock);
+    return attempts;
 }
 
 uint32_t tabforge_ble_rx_count(void)
